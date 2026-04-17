@@ -242,3 +242,187 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     Ok(())
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn grid(dimensions: usize, points: Vec<Vec<i32>>) -> GridDefinition {
+        GridDefinition { dimensions, points }
+    }
+
+    /// End-to-end check against the classic Android 3×3 grid. The
+    /// length-4-to-9 total of 389,112 is the canonical figure.
+    #[test]
+    fn android_3x3_matches_known_pattern_counts() {
+        #[rustfmt::skip]
+        let g = grid(
+            2,
+            vec![
+                vec![0, 0], vec![1, 0], vec![2, 0],
+                vec![0, 1], vec![1, 1], vec![2, 1],
+                vec![0, 2], vec![1, 2], vec![2, 2],
+            ],
+        );
+        g.validate().unwrap();
+        let blocks = compute_blocks(&g);
+        let counts = count_patterns_dp(g.points.len(), &blocks);
+
+        assert_eq!(counts[0], 1);
+        assert_eq!(counts[1], 9);
+        assert_eq!(counts[2], 56);
+        assert_eq!(counts[4], 1_624);
+        assert_eq!(counts[5], 7_152);
+        assert_eq!(counts[6], 26_016);
+        assert_eq!(counts[7], 72_912);
+        assert_eq!(counts[8], 140_704);
+        assert_eq!(counts[9], 140_704);
+        assert_eq!(counts[4..=9].iter().sum::<u64>(), 389_112);
+    }
+
+    /// Four corners of a unit square: no three are collinear, so the
+    /// problem collapses to pure permutations — counts[k] = P(4, k).
+    #[test]
+    fn no_three_collinear_collapses_to_permutations() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
+        let blocks = compute_blocks(&g);
+        assert!(blocks.iter().all(|&b| b == 0));
+        let counts = count_patterns_dp(g.points.len(), &blocks);
+        assert_eq!(counts, vec![1, 4, 12, 24, 24]);
+    }
+
+    /// A → C over midpoint B must record B as the blocker in both
+    /// directions (the matrix is symmetrised).
+    #[test]
+    fn linear_triplet_records_midpoint_as_blocker() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
+        let blocks = compute_blocks(&g);
+        let b_bit = 1u32 << 1;
+        assert_eq!(blocks[2], b_bit); // A → C
+        assert_eq!(blocks[6], b_bit); // C → A
+        assert_eq!(blocks[1], 0); // A → B (adjacent, no blocker)
+        assert_eq!(blocks[5], 0); // B → C (adjacent, no blocker)
+    }
+
+    /// A probe inside AB's axis-aligned box but off the line must not
+    /// be flagged. Without the cross-product check the bounding-box
+    /// prefilter alone would accept it.
+    #[test]
+    fn bounding_box_alone_does_not_imply_collinearity() {
+        // A=(0,0), B=(2,2), probe=(1,0): in the box, not on the diagonal.
+        let g = grid(2, vec![vec![0, 0], vec![2, 2], vec![1, 0]]);
+        let blocks = compute_blocks(&g);
+        assert_eq!(blocks[1], 0);
+        assert_eq!(blocks[3], 0);
+    }
+
+    /// Pairwise cross-product collinearity must generalise to 3-D:
+    /// (0,0,0) → (2,2,2) over the space-diagonal midpoint (1,1,1).
+    #[test]
+    fn collinearity_detected_in_three_dimensions() {
+        let g = grid(3, vec![vec![0, 0, 0], vec![1, 1, 1], vec![2, 2, 2]]);
+        let blocks = compute_blocks(&g);
+        let b_bit = 1u32 << 1;
+        assert_eq!(blocks[2], b_bit);
+        assert_eq!(blocks[6], b_bit);
+    }
+
+    /// 3-D negative: a probe that agrees with AB on two axes but
+    /// diverges on the third must not be deemed collinear. Catches an
+    /// incomplete pairwise-cross-product check.
+    #[test]
+    fn diverging_third_axis_is_not_collinear() {
+        // A=(0,0,0), B=(2,2,2), probe=(1,1,0): xy agrees, z does not.
+        let g = grid(3, vec![vec![0, 0, 0], vec![2, 2, 2], vec![1, 1, 0]]);
+        let blocks = compute_blocks(&g);
+        assert_eq!(blocks[1], 0);
+    }
+
+    /// The heart of the DP: a blocked direct move must become legal
+    /// exactly once the blocker joins the visited mask. For three
+    /// collinear points the two orderings that skip an unvisited
+    /// midpoint (A→C→B, C→A→B) are rejected, leaving four of the 3!
+    /// permutations.
+    #[test]
+    fn blocker_becomes_transparent_once_visited() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
+        let blocks = compute_blocks(&g);
+        let counts = count_patterns_dp(g.points.len(), &blocks);
+
+        assert_eq!(counts[1], 3);
+        // Only the 4 neighbour-pair starts are legal (A↔B, B↔C).
+        assert_eq!(counts[2], 4);
+        // A→B→C, B→A→C, B→C→A, C→B→A survive.
+        assert_eq!(counts[3], 4);
+    }
+
+    /// Base cases. The empty grid has only the empty pattern; one
+    /// point adds the trivial length-1 run. Guards against index
+    /// underflow and off-by-one in the DP seed.
+    #[test]
+    fn edge_cases_zero_and_one_point() {
+        let empty = grid(2, vec![]);
+        empty.validate().unwrap();
+        let blocks = compute_blocks(&empty);
+        assert!(blocks.is_empty());
+        assert_eq!(count_patterns_dp(0, &blocks), vec![1]);
+
+        let single = grid(2, vec![vec![7, 7]]);
+        single.validate().unwrap();
+        let blocks = compute_blocks(&single);
+        assert_eq!(blocks, vec![0]);
+        assert_eq!(count_patterns_dp(1, &blocks), vec![1, 1]);
+    }
+
+    /// `compute_blocks` explicitly symmetrises; downstream code never
+    /// queries the transpose, so a regression here would be silent.
+    #[test]
+    fn block_matrix_is_symmetric() {
+        #[rustfmt::skip]
+        let g = grid(
+            2,
+            vec![
+                vec![0, 0], vec![1, 0], vec![2, 0],
+                vec![0, 1], vec![1, 1], vec![2, 1],
+                vec![0, 2], vec![1, 2], vec![2, 2],
+            ],
+        );
+        let blocks = compute_blocks(&g);
+        let n = g.points.len();
+        for a in 0..n {
+            for b in 0..n {
+                assert_eq!(blocks[a * n + b], blocks[b * n + a]);
+            }
+        }
+    }
+
+    /// The memory ceiling: 26 points would allocate a 2²⁶·26 u64 DP
+    /// table (~13 GiB). `validate` stops the pipeline before
+    /// `compute_blocks` runs.
+    #[test]
+    fn validate_rejects_more_than_max_points() {
+        let points = vec![vec![0i32, 0]; MAX_POINTS + 1];
+        let err = grid(2, points).validate().unwrap_err();
+        assert!(err.contains("exceeds"), "unexpected error: {err}");
+    }
+
+    /// Boundary: exactly `MAX_POINTS` is still accepted — the check
+    /// is strict `>`, not `>=`.
+    #[test]
+    fn validate_accepts_exactly_max_points() {
+        let points = vec![vec![0i32, 0]; MAX_POINTS];
+        assert!(grid(2, points).validate().is_ok());
+    }
+
+    /// A point whose coordinate count disagrees with `dimensions` must
+    /// be rejected, and the offending index reported so the user can
+    /// locate it in a large grid.
+    #[test]
+    fn validate_rejects_dimension_mismatch() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0, 2], vec![2, 0]]);
+        let err = g.validate().unwrap_err();
+        assert!(err.contains("point 1"), "unexpected error: {err}");
+        assert!(err.contains('3'), "unexpected error: {err}");
+    }
+}
