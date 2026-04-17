@@ -2,5 +2,18 @@
 name = "andlock"
 version = "0.1.0"
 edition = "2024"
+description = "Rust tool to count Android unlock patterns on n-dimensional nodes"
+authors = ["Juan Luis Leal Contreras <kuenlunleal@gmail.com>"]
+license = "GPL-3.0-or-later"
 
 [dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+warnings = "deny"
+
+[lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
