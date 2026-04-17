@@ -16,6 +16,413 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-fn main() {
-    println!("Hello, world!");
+use std::error::Error;
+use std::time::Instant;
+
+use serde::Deserialize;
+
+/// Upper bound on the number of nodes the program accepts.
+///
+/// [`count_patterns_dp`] represents the visited set with a `u32` bitmask and
+/// allocates a `2ⁿ × n` table of `u64` counts. At `n = 25` the table already
+/// reaches ~6.7 GiB, which we treat as the ceiling of what is realistic to
+/// run on a workstation.
+const MAX_POINTS: usize = 25;
+
+/// Finite set of integer-coordinate nodes in `dimensions`-dimensional space.
+#[derive(Deserialize)]
+struct GridDefinition {
+    dimensions: usize,
+    points: Vec<Vec<i32>>,
+}
+
+impl GridDefinition {
+    /// Validates the structural invariants required by the rest of the pipeline.
+    ///
+    /// # Errors
+    /// Returns an error if the point count exceeds [`MAX_POINTS`] or any point
+    /// does not have exactly [`GridDefinition::dimensions`] coordinates.
+    fn validate(&self) -> Result<(), String> {
+        let n = self.points.len();
+        if n > MAX_POINTS {
+            return Err(format!(
+                "{n} points exceeds the supported maximum of {MAX_POINTS}"
+            ));
+        }
+        for (idx, point) in self.points.iter().enumerate() {
+            if point.len() != self.dimensions {
+                return Err(format!(
+                    "point {idx} has {actual} coordinate(s); expected {expected}",
+                    actual = point.len(),
+                    expected = self.dimensions,
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Builds the blocking-constraint matrix for the given grid.
+///
+/// Returns a flat `n × n` row-major matrix where `blocks[a * n + b]` is the
+/// bitmask of nodes lying strictly on the open segment `(a, b)` — the nodes
+/// that must already be visited for a direct move `a → b` to be legal.
+///
+/// The matrix is symmetric: `blocks[a * n + b] == blocks[b * n + a]`.
+fn compute_blocks(grid: &GridDefinition) -> Vec<u32> {
+    let n = grid.points.len();
+    let dim = grid.dimensions;
+    let mut blocks = vec![0u32; n * n];
+
+    for a in 0..n {
+        let origin = &grid.points[a];
+        // Each unordered pair is processed once; the relation is symmetric.
+        for b in (a + 1)..n {
+            let target = &grid.points[b];
+
+            for (c, probe) in grid.points.iter().enumerate() {
+                if c == a || c == b {
+                    continue;
+                }
+
+                // Bounding-box prefilter: the probe must lie inside the
+                // axis-aligned box spanned by AB in every dimension.
+                let in_box = (0..dim).all(|i| {
+                    let lo = origin[i].min(target[i]);
+                    let hi = origin[i].max(target[i]);
+                    lo <= probe[i] && probe[i] <= hi
+                });
+                if !in_box {
+                    continue;
+                }
+
+                // Collinearity: AC and AB must be parallel. In n dimensions
+                // this is equivalent to every pairwise 2-D cross product
+                // vanishing. Promotion to i64 avoids overflow on the product
+                // of two i32 coordinate differences.
+                let collinear = (0..dim).all(|i| {
+                    ((i + 1)..dim).all(|j| {
+                        let dx = i64::from(target[i] - origin[i]);
+                        let dy = i64::from(target[j] - origin[j]);
+                        let ex = i64::from(probe[i] - origin[i]);
+                        let ey = i64::from(probe[j] - origin[j]);
+                        ex * dy == ey * dx
+                    })
+                });
+
+                if collinear {
+                    let c_bit = 1u32 << c;
+                    blocks[a * n + b] |= c_bit;
+                    blocks[b * n + a] |= c_bit;
+                }
+            }
+        }
+    }
+
+    blocks
+}
+
+/// Counts every valid pattern via bottom-up bitmask dynamic programming.
+///
+/// `blocks[i * n + j]` must hold the bitmask of nodes that must already be
+/// visited before the move `i → j` is legal (see [`compute_blocks`]).
+///
+/// Returns a `Vec<u64>` of length `n + 1` where `counts[k]` is the number of
+/// valid patterns of exactly `k` nodes. `counts[0] = 1` (the empty pattern).
+///
+/// # Complexity
+/// - Time: `O(N² · 2ᴺ)`
+/// - Space: `O(N · 2ᴺ)`
+///
+/// # Panics
+/// Panics if `n > MAX_POINTS` or `blocks.len() != n * n`.
+fn count_patterns_dp(n: usize, blocks: &[u32]) -> Vec<u64> {
+    assert!(
+        n <= MAX_POINTS,
+        "N={n} exceeds the DP limit of {MAX_POINTS}"
+    );
+    assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
+
+    let mut counts = vec![0u64; n + 1];
+    counts[0] = 1;
+    if n == 0 {
+        return counts;
+    }
+
+    let num_masks: usize = 1 << n;
+    let full_mask: u32 = (1u32 << n) - 1;
+
+    // dp[mask * n + node] = number of valid orderings that visit exactly the
+    // set encoded by `mask` and end at `node`. The mask-major layout keeps
+    // the inner scan over endpoints within a mask contiguous in memory.
+    let mut dp = vec![0u64; num_masks * n];
+
+    // Seed every length-1 state: a pattern visiting only `v` and ending at `v`.
+    for v in 0..n {
+        dp[(1usize << v) * n + v] = 1;
+    }
+    counts[1] = n as u64;
+
+    // Enumerate masks in ascending order. Any proper subset of `mask` has a
+    // strictly smaller value, so all prerequisite states are already set by
+    // the time we reach `mask`.
+    for mask in 1u32..=full_mask {
+        let base = (mask as usize) * n;
+        let len = mask.count_ones() as usize;
+
+        // Walk every bit set in `mask` — each is a candidate endpoint.
+        let mut visited = mask;
+        while visited != 0 {
+            let end_bit = visited & visited.wrapping_neg();
+            visited ^= end_bit;
+            let end = end_bit.trailing_zeros() as usize;
+
+            let ways = dp[base + end];
+            if ways == 0 {
+                continue;
+            }
+
+            // Walk every bit NOT in `mask` — each is a candidate next node.
+            let mut free = !mask & full_mask;
+            while free != 0 {
+                let next_bit = free & free.wrapping_neg();
+                free ^= next_bit;
+                let next = next_bit.trailing_zeros() as usize;
+
+                // A move is legal iff every blocker is already visited.
+                let blockers = blocks[end * n + next];
+                if mask & blockers == blockers {
+                    let new_mask = (mask | next_bit) as usize;
+                    dp[new_mask * n + next] += ways;
+                    counts[len + 1] += ways;
+                }
+            }
+        }
+    }
+
+    counts
+}
+
+fn main() -> Result<(), Box<dyn Error>> {
+    // Classic 3×3 Android unlock grid.
+    let json_input = r#"{
+        "dimensions": 2,
+        "points": [
+            [0, 0], [1, 0], [2, 0],
+            [0, 1], [1, 1], [2, 1],
+            [0, 2], [1, 2], [2, 2]
+        ]
+    }"#;
+
+    let grid: GridDefinition = serde_json::from_str(json_input)?;
+    grid.validate()?;
+
+    let n = grid.points.len();
+    let dim = grid.dimensions;
+    println!("Computing block constraints for {n} points in {dim}D...");
+
+    let t0 = Instant::now();
+    let blocks = compute_blocks(&grid);
+    println!("Block matrix computed in {:?}\n", t0.elapsed());
+
+    println!("Computing valid patterns for {n} points...");
+    let t1 = Instant::now();
+    let counts = count_patterns_dp(n, &blocks);
+    let elapsed = t1.elapsed();
+
+    let total: u64 = counts.iter().sum();
+    for (k, c) in counts.iter().enumerate() {
+        if *c > 0 {
+            println!("  Length {k:>2}: {c}");
+        }
+    }
+    println!("───────────────────────────");
+    println!("  Total: {total}");
+    println!("  Time:  {elapsed:?}");
+
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    fn grid(dimensions: usize, points: Vec<Vec<i32>>) -> GridDefinition {
+        GridDefinition { dimensions, points }
+    }
+
+    /// End-to-end check against the classic Android 3×3 grid. The
+    /// length-4-to-9 total of 389,112 is the canonical figure.
+    #[test]
+    fn android_3x3_matches_known_pattern_counts() {
+        #[rustfmt::skip]
+        let g = grid(
+            2,
+            vec![
+                vec![0, 0], vec![1, 0], vec![2, 0],
+                vec![0, 1], vec![1, 1], vec![2, 1],
+                vec![0, 2], vec![1, 2], vec![2, 2],
+            ],
+        );
+        g.validate().unwrap();
+        let blocks = compute_blocks(&g);
+        let counts = count_patterns_dp(g.points.len(), &blocks);
+
+        assert_eq!(counts[0], 1);
+        assert_eq!(counts[1], 9);
+        assert_eq!(counts[2], 56);
+        assert_eq!(counts[4], 1_624);
+        assert_eq!(counts[5], 7_152);
+        assert_eq!(counts[6], 26_016);
+        assert_eq!(counts[7], 72_912);
+        assert_eq!(counts[8], 140_704);
+        assert_eq!(counts[9], 140_704);
+        assert_eq!(counts[4..=9].iter().sum::<u64>(), 389_112);
+    }
+
+    /// Four corners of a unit square: no three are collinear, so the
+    /// problem collapses to pure permutations — counts[k] = P(4, k).
+    #[test]
+    fn no_three_collinear_collapses_to_permutations() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
+        let blocks = compute_blocks(&g);
+        assert!(blocks.iter().all(|&b| b == 0));
+        let counts = count_patterns_dp(g.points.len(), &blocks);
+        assert_eq!(counts, vec![1, 4, 12, 24, 24]);
+    }
+
+    /// A → C over midpoint B must record B as the blocker in both
+    /// directions (the matrix is symmetrised).
+    #[test]
+    fn linear_triplet_records_midpoint_as_blocker() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
+        let blocks = compute_blocks(&g);
+        let b_bit = 1u32 << 1;
+        assert_eq!(blocks[2], b_bit); // A → C
+        assert_eq!(blocks[6], b_bit); // C → A
+        assert_eq!(blocks[1], 0); // A → B (adjacent, no blocker)
+        assert_eq!(blocks[5], 0); // B → C (adjacent, no blocker)
+    }
+
+    /// A probe inside AB's axis-aligned box but off the line must not
+    /// be flagged. Without the cross-product check the bounding-box
+    /// prefilter alone would accept it.
+    #[test]
+    fn bounding_box_alone_does_not_imply_collinearity() {
+        // A=(0,0), B=(2,2), probe=(1,0): in the box, not on the diagonal.
+        let g = grid(2, vec![vec![0, 0], vec![2, 2], vec![1, 0]]);
+        let blocks = compute_blocks(&g);
+        assert_eq!(blocks[1], 0);
+        assert_eq!(blocks[3], 0);
+    }
+
+    /// Pairwise cross-product collinearity must generalise to 3-D:
+    /// (0,0,0) → (2,2,2) over the space-diagonal midpoint (1,1,1).
+    #[test]
+    fn collinearity_detected_in_three_dimensions() {
+        let g = grid(3, vec![vec![0, 0, 0], vec![1, 1, 1], vec![2, 2, 2]]);
+        let blocks = compute_blocks(&g);
+        let b_bit = 1u32 << 1;
+        assert_eq!(blocks[2], b_bit);
+        assert_eq!(blocks[6], b_bit);
+    }
+
+    /// 3-D negative: a probe that agrees with AB on two axes but
+    /// diverges on the third must not be deemed collinear. Catches an
+    /// incomplete pairwise-cross-product check.
+    #[test]
+    fn diverging_third_axis_is_not_collinear() {
+        // A=(0,0,0), B=(2,2,2), probe=(1,1,0): xy agrees, z does not.
+        let g = grid(3, vec![vec![0, 0, 0], vec![2, 2, 2], vec![1, 1, 0]]);
+        let blocks = compute_blocks(&g);
+        assert_eq!(blocks[1], 0);
+    }
+
+    /// The heart of the DP: a blocked direct move must become legal
+    /// exactly once the blocker joins the visited mask. For three
+    /// collinear points the two orderings that skip an unvisited
+    /// midpoint (A→C→B, C→A→B) are rejected, leaving four of the 3!
+    /// permutations.
+    #[test]
+    fn blocker_becomes_transparent_once_visited() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
+        let blocks = compute_blocks(&g);
+        let counts = count_patterns_dp(g.points.len(), &blocks);
+
+        assert_eq!(counts[1], 3);
+        // Only the 4 neighbour-pair starts are legal (A↔B, B↔C).
+        assert_eq!(counts[2], 4);
+        // A→B→C, B→A→C, B→C→A, C→B→A survive.
+        assert_eq!(counts[3], 4);
+    }
+
+    /// Base cases. The empty grid has only the empty pattern; one
+    /// point adds the trivial length-1 run. Guards against index
+    /// underflow and off-by-one in the DP seed.
+    #[test]
+    fn edge_cases_zero_and_one_point() {
+        let empty = grid(2, vec![]);
+        empty.validate().unwrap();
+        let blocks = compute_blocks(&empty);
+        assert!(blocks.is_empty());
+        assert_eq!(count_patterns_dp(0, &blocks), vec![1]);
+
+        let single = grid(2, vec![vec![7, 7]]);
+        single.validate().unwrap();
+        let blocks = compute_blocks(&single);
+        assert_eq!(blocks, vec![0]);
+        assert_eq!(count_patterns_dp(1, &blocks), vec![1, 1]);
+    }
+
+    /// `compute_blocks` explicitly symmetrises; downstream code never
+    /// queries the transpose, so a regression here would be silent.
+    #[test]
+    fn block_matrix_is_symmetric() {
+        #[rustfmt::skip]
+        let g = grid(
+            2,
+            vec![
+                vec![0, 0], vec![1, 0], vec![2, 0],
+                vec![0, 1], vec![1, 1], vec![2, 1],
+                vec![0, 2], vec![1, 2], vec![2, 2],
+            ],
+        );
+        let blocks = compute_blocks(&g);
+        let n = g.points.len();
+        for a in 0..n {
+            for b in 0..n {
+                assert_eq!(blocks[a * n + b], blocks[b * n + a]);
+            }
+        }
+    }
+
+    /// The memory ceiling: 26 points would allocate a 2²⁶·26 u64 DP
+    /// table (~13 GiB). `validate` stops the pipeline before
+    /// `compute_blocks` runs.
+    #[test]
+    fn validate_rejects_more_than_max_points() {
+        let points = vec![vec![0i32, 0]; MAX_POINTS + 1];
+        let err = grid(2, points).validate().unwrap_err();
+        assert!(err.contains("exceeds"), "unexpected error: {err}");
+    }
+
+    /// Boundary: exactly `MAX_POINTS` is still accepted — the check
+    /// is strict `>`, not `>=`.
+    #[test]
+    fn validate_accepts_exactly_max_points() {
+        let points = vec![vec![0i32, 0]; MAX_POINTS];
+        assert!(grid(2, points).validate().is_ok());
+    }
+
+    /// A point whose coordinate count disagrees with `dimensions` must
+    /// be rejected, and the offending index reported so the user can
+    /// locate it in a large grid.
+    #[test]
+    fn validate_rejects_dimension_mismatch() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0, 2], vec![2, 0]]);
+        let err = g.validate().unwrap_err();
+        assert!(err.contains("point 1"), "unexpected error: {err}");
+        assert!(err.contains('3'), "unexpected error: {err}");
+    }
 }
