@@ -12,13 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - implement n-dimensional unlock pattern counter with bitmask DP ([#1](https://github.com/Kuenlun/andlock/pull/1))
-- accept grid definition as JSON input via `serde` deserialization
-- validate input enforcing a 25-point ceiling and per-point dimension consistency
-- add test suite covering the canonical 3×3 Android grid, n-dimensional collinearity, and edge cases
+- accept grid definition as JSON input via `serde` deserialization ([#1](https://github.com/Kuenlun/andlock/pull/1))
+- validate input enforcing a 25-point ceiling and per-point dimension consistency ([#1](https://github.com/Kuenlun/andlock/pull/1))
+- add test suite covering the canonical 3×3 Android grid, n-dimensional collinearity, and edge cases ([#1](https://github.com/Kuenlun/andlock/pull/1))
 
 ### Fixed
 
-- add execute permission to `check-license-headers.sh`
+- add execute permission to `check-license-headers.sh` ([#1](https://github.com/Kuenlun/andlock/pull/1))
 
 ### Other
 
