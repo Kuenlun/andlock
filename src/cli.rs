@@ -42,6 +42,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Generate a rectangular grid on the fly and count its patterns.
+    /// Length 0 (the empty/null pattern) is counted as a valid pattern.
     Grid {
         /// Axis sizes separated by 'x' (e.g. "3x3", "10", "2x3x2").
         dims: String,
@@ -58,7 +59,8 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
     },
-    /// Load a `GridDefinition` from a JSON file and count its patterns (maximum 25 points).
+    /// Load a `GridDefinition` from a JSON file and count its patterns (0–25 points).
+    /// Length 0 (the empty/null pattern) is counted as a valid pattern.
     File {
         /// Path to a JSON file containing a `GridDefinition`.
         path: PathBuf,
@@ -107,7 +109,11 @@ fn run_pipeline(grid: &GridDefinition, quiet: bool) {
     let total: u64 = counts.iter().sum();
     for (k, c) in counts.iter().enumerate() {
         if *c > 0 {
-            println!("  Length {k:>2}: {c}");
+            if k == 0 {
+                println!("  Length {k:>2}: {c}  (empty/null pattern)");
+            } else {
+                println!("  Length {k:>2}: {c}");
+            }
         }
     }
     println!("───────────────────────────");
