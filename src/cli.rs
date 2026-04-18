@@ -188,11 +188,7 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     let mut lines: Vec<String> = Vec::new();
     for (k, c) in counts.iter().enumerate().skip(min_length) {
         if *c > 0 {
-            if k == 0 {
-                lines.push(format!("  Length {k:>2}: {c}  (empty/null pattern)"));
-            } else {
-                lines.push(format!("  Length {k:>2}: {c}"));
-            }
+            lines.push(format!("  Length {k:>2}: {c}"));
         }
     }
     let total_line = format!("  Total: {total}");
