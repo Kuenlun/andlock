@@ -90,7 +90,7 @@ struct RangeArgs {
     #[arg(long, value_name = "N")]
     min_length: Option<usize>,
 
-    /// Only include patterns with at most N points. The DP prunes longer prefixes, so a tight cap exponentially reduces runtime. Defaults to the total point count.
+    /// Only include patterns with at most N points. The algorithm prunes longer prefixes, so a tight cap exponentially reduces runtime. Defaults to the total point count.
     #[arg(long, value_name = "N")]
     max_length: Option<usize>,
 }
