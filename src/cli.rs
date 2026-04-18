@@ -51,24 +51,36 @@ enum Command {
         /// Emit the generated `GridDefinition` as pretty JSON instead of running the DP.
         #[arg(long)]
         export_json: bool,
+
+        /// Suppress progress and timing output (results still printed to stdout).
+        #[arg(short, long)]
+        quiet: bool,
     },
     /// Load a `GridDefinition` from a JSON file and count its patterns.
     File {
         /// Path to a JSON file containing a `GridDefinition`.
         path: PathBuf,
+
+        /// Suppress progress and timing output (results still printed to stdout).
+        #[arg(short, long)]
+        quiet: bool,
     },
 }
 
-fn run_pipeline(grid: &GridDefinition) {
+fn run_pipeline(grid: &GridDefinition, quiet: bool) {
     let n = grid.points.len();
     let dim = grid.dimensions;
-    println!("Computing block constraints for {n} points in {dim}D...");
+    if !quiet {
+        eprint!("Computing block constraints for {n} points in {dim}D...");
+    }
 
     let t0 = Instant::now();
     let blocks = compute_blocks(grid);
-    println!("Block matrix computed in {:?}\n", t0.elapsed());
+    if !quiet {
+        eprintln!("\nBlock matrix computed in {:?}\n", t0.elapsed());
+        eprint!("Computing valid patterns for {n} points...");
+    }
 
-    println!("Computing valid patterns for {n} points...");
     let t1 = Instant::now();
     let counts = count_patterns_dp(n, &blocks);
     let elapsed = t1.elapsed();
@@ -81,7 +93,9 @@ fn run_pipeline(grid: &GridDefinition) {
     }
     println!("───────────────────────────");
     println!("  Total: {total}");
-    println!("  Time:  {elapsed:?}");
+    if !quiet {
+        eprintln!("\n  Time:  {elapsed:?}");
+    }
 }
 
 /// # Errors
@@ -94,6 +108,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             dims,
             free_points,
             export_json,
+            quiet,
         } => {
             let parsed = parse_dims(&dims)?;
             let grid = build_grid_definition(&parsed, free_points);
@@ -104,13 +119,13 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             }
 
             grid.validate()?;
-            run_pipeline(&grid);
+            run_pipeline(&grid, quiet);
         }
-        Command::File { path } => {
+        Command::File { path, quiet } => {
             let content = fs::read_to_string(&path)?;
             let grid: GridDefinition = serde_json::from_str(&content)?;
             grid.validate()?;
-            run_pipeline(&grid);
+            run_pipeline(&grid, quiet);
         }
     }
 
