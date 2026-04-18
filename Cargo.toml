@@ -1,6 +1,6 @@
 [package]
 name = "andlock"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Rust tool to count Android unlock patterns on n-dimensional nodes"
 authors = ["Juan Luis Leal Contreras <kuenlunleal@gmail.com>"]

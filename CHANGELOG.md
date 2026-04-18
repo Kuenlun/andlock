@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1](https://github.com/Kuenlun/andlock/compare/v0.1.0...v0.1.1) - 2026-04-18
+
+### Added
+
+- introduce clap-based CLI with grid and file subcommands ([#4](https://github.com/Kuenlun/andlock/pull/4))
+
+### Other
+
+- release v0.1.0 ([#2](https://github.com/Kuenlun/andlock/pull/2))
+
 ## [0.1.0](https://github.com/Kuenlun/andlock/releases/tag/v0.1.0) - 2026-04-17
 
 ### Added
