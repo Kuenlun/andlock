@@ -48,7 +48,7 @@ enum Command {
         #[arg(short = 'f', long, default_value_t = 0)]
         free_points: usize,
 
-        /// Emit the generated `GridDefinition` as pretty JSON instead of running the DP.
+        /// Emit the generated `GridDefinition` as pretty JSON to stdout instead of running the DP (use `> file.json` to save).
         #[arg(long)]
         export_json: bool,
 
