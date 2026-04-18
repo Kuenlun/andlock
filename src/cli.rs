@@ -71,7 +71,7 @@ enum Command {
         /// Path to a JSON file containing a `GridDefinition`, or `-` to read from stdin.
         path: PathBuf,
 
-        /// Re-emit the (normalised) `GridDefinition` as pretty JSON to stdout instead of counting patterns.
+        /// Re-emit the loaded `GridDefinition` as pretty-printed JSON to stdout instead of counting patterns.
         #[arg(long)]
         export_json: bool,
 
@@ -182,7 +182,6 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
 
     if let Some(pb) = dp_pb {
         pb.finish_and_clear();
-        eprintln!("  [Finished] Patterns counted in {elapsed:.2?}");
     }
 
     let total: u128 = counts[min_length..=max_length].iter().sum();
@@ -208,6 +207,9 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     }
     println!("{}", "─".repeat(sep_width));
     println!("{total_line}");
+    if !quiet {
+        eprintln!("  [Finished] Patterns counted in {elapsed:.2?}");
+    }
 }
 
 /// # Errors
@@ -227,6 +229,11 @@ pub fn run() -> Result<()> {
             let grid = build_grid_definition(&parsed, free_points);
 
             if export_json {
+                if range.min_length.is_some() || range.max_length.is_some() {
+                    return Err(anyhow!(
+                        "--min-length and --max-length have no effect with --export-json"
+                    ));
+                }
                 println!("{}", serde_json::to_string_pretty(&grid)?);
                 return Ok(());
             }
@@ -260,6 +267,11 @@ pub fn run() -> Result<()> {
                 .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?;
 
             if export_json {
+                if range.min_length.is_some() || range.max_length.is_some() {
+                    return Err(anyhow!(
+                        "--min-length and --max-length have no effect with --export-json"
+                    ));
+                }
                 println!("{}", serde_json::to_string_pretty(&grid)?);
                 return Ok(());
             }
