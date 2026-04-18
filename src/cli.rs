@@ -19,9 +19,10 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use std::fs;
 use std::io;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use indicatif::{ProgressBar, ProgressStyle};
 
 use clap::{Args, Parser, Subcommand};
 
@@ -121,23 +122,62 @@ const fn io_kind_str(kind: io::ErrorKind) -> &'static str {
     }
 }
 
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {spinner:.dim} {msg}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner())
+}
+
+fn bar_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {msg}  [{bar:40.cyan/dim}]  {percent}%  eta {eta}")
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("━━╌")
+}
+
 fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, quiet: bool) {
     let n = grid.points.len();
     let dim = grid.dimensions;
-    if !quiet {
-        eprint!("Computing block matrix for {n} points in {dim}D...");
+
+    // Block matrix
+    let block_pb = if quiet {
+        None
+    } else {
+        let pb = ProgressBar::new_spinner();
+        pb.set_style(spinner_style());
+        pb.set_message(format!("Building block matrix ({n} points, {dim}D)"));
+        pb.enable_steady_tick(Duration::from_millis(80));
+        Some(pb)
+    };
+
+    let blocks = compute_blocks(grid);
+
+    if let Some(ref pb) = block_pb {
+        pb.finish_and_clear();
     }
 
-    let t0 = Instant::now();
-    let blocks = compute_blocks(grid);
-    if !quiet {
-        eprintln!("\nBlock matrix computed in {:?}\n", t0.elapsed());
-        eprint!("Computing valid patterns for {n} points...");
-    }
+    // DP — total masks the outer loop will tick through: 2^n − 1
+    let num_masks: u64 = (1u64 << n).saturating_sub(1);
+    let dp_pb = if quiet {
+        None
+    } else {
+        let pb = ProgressBar::new(num_masks);
+        pb.set_style(bar_style());
+        pb.set_message(format!("Counting patterns ({n} points)"));
+        pb.enable_steady_tick(Duration::from_millis(80));
+        Some(pb)
+    };
 
     let t1 = Instant::now();
-    let counts = count_patterns_dp(n, &blocks, max_length);
+    let counts = count_patterns_dp(n, &blocks, max_length, || {
+        if let Some(ref pb) = dp_pb {
+            pb.inc(1);
+        }
+    });
     let elapsed = t1.elapsed();
+
+    if let Some(pb) = dp_pb {
+        pb.finish_and_clear();
+        eprintln!("  [Finished] Patterns counted in {elapsed:.2?}");
+    }
 
     let total: u128 = counts[min_length..=max_length].iter().sum();
     let mut lines: Vec<String> = Vec::new();
@@ -162,9 +202,6 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     }
     println!("{}", "─".repeat(sep_width));
     println!("{total_line}");
-    if !quiet {
-        eprintln!("\n  Time:  {elapsed:?}");
-    }
 }
 
 /// # Errors
