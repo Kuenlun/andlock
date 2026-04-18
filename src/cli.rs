@@ -65,9 +65,15 @@ enum Command {
     },
     /// Load a `GridDefinition` from a JSON file and count its patterns (0–25 points).
     /// Length 0 (the empty/null pattern) is counted as a valid pattern unless `--min-length` excludes it.
+    /// Pass `-` as the path to read from stdin, enabling pipelines like:
+    ///   andlock grid "3x3" --export-json | andlock file -
     File {
-        /// Path to a JSON file containing a `GridDefinition`.
+        /// Path to a JSON file containing a `GridDefinition`, or `-` to read from stdin.
         path: PathBuf,
+
+        /// Re-emit the (normalised) `GridDefinition` as pretty JSON to stdout instead of counting patterns.
+        #[arg(long)]
+        export_json: bool,
 
         #[command(flatten)]
         range: RangeArgs,
@@ -229,16 +235,35 @@ pub fn run() -> Result<()> {
             let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
             run_pipeline(&grid, min_length, max_length, quiet);
         }
-        Command::File { path, range, quiet } => {
-            let content = fs::read_to_string(&path).map_err(|e| {
-                anyhow!(
-                    "could not open file \"{}\": {}",
-                    path.display(),
-                    io_kind_str(e.kind())
-                )
-            })?;
+        Command::File {
+            path,
+            export_json,
+            range,
+            quiet,
+        } => {
+            let stdin_sentinel = std::path::Path::new("-");
+            let (content, src_label) = if path == stdin_sentinel {
+                let text = io::read_to_string(io::stdin())
+                    .map_err(|e| anyhow!("could not read from stdin: {}", io_kind_str(e.kind())))?;
+                (text, "stdin".to_owned())
+            } else {
+                let text = fs::read_to_string(&path).map_err(|e| {
+                    anyhow!(
+                        "could not open file \"{}\": {}",
+                        path.display(),
+                        io_kind_str(e.kind())
+                    )
+                })?;
+                (text, format!("\"{}\"", path.display()))
+            };
             let grid: GridDefinition = serde_json::from_str(&content)
-                .map_err(|e| anyhow!("failed to parse JSON file \"{}\": {}", path.display(), e))?;
+                .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?;
+
+            if export_json {
+                println!("{}", serde_json::to_string_pretty(&grid)?);
+                return Ok(());
+            }
+
             grid.validate().map_err(|e| anyhow!("{e}"))?;
             let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
             run_pipeline(&grid, min_length, max_length, quiet);
