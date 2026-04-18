@@ -118,7 +118,9 @@ pub fn parse_dims(spec: &str) -> Result<Vec<i32>, String> {
     if spec.is_empty() {
         return Err("dimensions string must not be empty".into());
     }
-    spec.split('x')
+    let normalized = spec.to_ascii_lowercase();
+    normalized
+        .split('x')
         .map(|part| {
             let value: i32 = part.parse().map_err(|_| {
                 format!("invalid dimension component '{part}': expected a positive integer")
@@ -289,6 +291,12 @@ mod tests {
     fn parse_dims_rejects_empty_string() {
         let err = parse_dims("").unwrap_err();
         assert!(err.contains("empty"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn parse_dims_accepts_uppercase_separator() {
+        assert_eq!(parse_dims("3X3").unwrap(), vec![3, 3]);
+        assert_eq!(parse_dims("2X3X2").unwrap(), vec![2, 3, 2]);
     }
 
     #[test]
