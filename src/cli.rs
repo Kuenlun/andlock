@@ -140,17 +140,28 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     let elapsed = t1.elapsed();
 
     let total: u64 = counts[min_length..=max_length].iter().sum();
+    let mut lines: Vec<String> = Vec::new();
     for (k, c) in counts.iter().enumerate().skip(min_length) {
         if *c > 0 {
             if k == 0 {
-                println!("  Length {k:>2}: {c}  (empty/null pattern)");
+                lines.push(format!("  Length {k:>2}: {c}  (empty/null pattern)"));
             } else {
-                println!("  Length {k:>2}: {c}");
+                lines.push(format!("  Length {k:>2}: {c}"));
             }
         }
     }
-    println!("───────────────────────────");
-    println!("  Total: {total}");
+    let total_line = format!("  Total: {total}");
+    let sep_width = lines
+        .iter()
+        .chain(std::iter::once(&total_line))
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(27);
+    for line in &lines {
+        println!("{line}");
+    }
+    println!("{}", "─".repeat(sep_width));
+    println!("{total_line}");
     if !quiet {
         eprintln!("\n  Time:  {elapsed:?}");
     }
