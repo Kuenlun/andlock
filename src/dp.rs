@@ -70,7 +70,10 @@ pub fn count_patterns_dp(
     // dp[mask * n + node] = number of valid orderings that visit exactly the
     // set encoded by `mask` and end at `node`. Mask-major layout keeps the
     // inner scan over endpoints contiguous in memory.
-    let mut dp = vec![0u64; num_masks * n];
+    //
+    // Per-state values can reach (len-1)! at the full mask, which exceeds
+    // u64::MAX starting around n=22 — hence u128 (same rationale as `counts`).
+    let mut dp = vec![0u128; num_masks * n];
 
     for v in 0..n {
         dp[(1usize << v) * n + v] = 1;
@@ -108,7 +111,7 @@ pub fn count_patterns_dp(
 
                 let blockers = blocks[end * n + next];
                 if mask & blockers == blockers {
-                    counts[len + 1] += u128::from(ways);
+                    counts[len + 1] += ways;
                     // Writes into the terminal layer would never be read,
                     // since masks of length `max_length` are skipped above.
                     if len + 1 < max_length {
@@ -226,11 +229,11 @@ mod tests {
     }
 
     // Regression test: with n=21 the sum of patterns exceeds u64::MAX (≈1.84×10¹⁹)
-    // because 21! ≈ 5.1×10¹⁹. Before the fix, counts used u64 and panicked with
+    // because 21! ≈ 5.1×10¹⁹. Before the fix, `counts` used u64 and panicked with
     // "attempt to add with overflow" on `grid 4x4 -f 5`.
-    // This test requires ~350 MB of DP table.
+    // This test requires ~700 MB of DP table.
     #[test]
-    #[ignore = "allocates ~350 MB — run manually with: cargo test -- --ignored"]
+    #[ignore = "allocates ~700 MB — run manually with: cargo test -- --ignored"]
     fn count_4x4_plus_5_free_does_not_overflow() {
         let g = build_grid_definition(&[4, 4], 5);
         let blocks = compute_blocks(&g);
@@ -244,6 +247,37 @@ mod tests {
             "expected counts[21] to exceed u64::MAX but got {}",
             counts[n]
         );
+    }
+
+    // Regression test for silent overflow in the DP table itself. At n=24, the
+    // per-endpoint `ways` stored at mask length 23 reaches ≈21! ≈ 5.1×10¹⁹,
+    // which wraps in u64 and produces counts[24] < counts[23] — a monotonicity
+    // violation that is provably impossible (every full pattern of length 24
+    // extends some length-23 prefix). We assert on every suffix length to lock
+    // the invariant in place.
+    //
+    // This allocates ~6.4 GB for the DP table, so it is ignored by default.
+    #[test]
+    #[ignore = "allocates ~6.4 GB — run manually with: cargo test -- --ignored"]
+    fn count_4x4_plus_8_free_is_monotonic_in_length() {
+        let g = build_grid_definition(&[4, 4], 8);
+        let blocks = compute_blocks(&g);
+        let n = g.points.len();
+        assert_eq!(n, 24);
+        let counts = count_patterns_dp(n, &blocks, n, || {});
+        for k in 1..=n {
+            assert!(
+                counts[k] >= counts[k - 1],
+                "counts[{k}]={} must be >= counts[{}]={}; DP likely overflowed",
+                counts[k],
+                k - 1,
+                counts[k - 1]
+            );
+        }
+        // With 8 free orthogonal axes the base-grid collinearities are
+        // preserved, so counts[n] is strictly less than n! but still well above
+        // u64::MAX.
+        assert!(counts[n] > u128::from(u64::MAX));
     }
 
     #[test]
