@@ -139,7 +139,7 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     let counts = count_patterns_dp(n, &blocks, max_length);
     let elapsed = t1.elapsed();
 
-    let total: u64 = counts[min_length..=max_length].iter().sum();
+    let total: u128 = counts[min_length..=max_length].iter().sum();
     let mut lines: Vec<String> = Vec::new();
     for (k, c) in counts.iter().enumerate().skip(min_length) {
         if *c > 0 {

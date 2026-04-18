@@ -27,9 +27,13 @@ use crate::grid::MAX_POINTS;
 /// reaches `max_length` is not extended, so the exponential inner work for
 /// longer prefixes is never performed.
 ///
-/// Returns a `Vec<u64>` of length `max_length + 1` where `counts[k]` is the
+/// Returns a `Vec<u128>` of length `max_length + 1` where `counts[k]` is the
 /// number of valid patterns of exactly `k` nodes. `counts[0] = 1` (the empty
 /// pattern).
+///
+/// `u128` is used because for n ≥ 21 the total count can exceed `u64::MAX`
+/// (e.g. an unrestricted 21-node graph can produce 21! ≈ 5.1 × 10¹⁹ patterns,
+/// while `u64::MAX` ≈ 1.8 × 10¹⁹).
 ///
 /// # Complexity
 /// With `L = max_length`, extension work is bounded by the prefixes of length
@@ -38,7 +42,7 @@ use crate::grid::MAX_POINTS;
 ///
 /// # Panics
 /// Panics if `n > MAX_POINTS`, `blocks.len() != n * n`, or `max_length > n`.
-pub fn count_patterns_dp(n: usize, blocks: &[u32], max_length: usize) -> Vec<u64> {
+pub fn count_patterns_dp(n: usize, blocks: &[u32], max_length: usize) -> Vec<u128> {
     assert!(
         n <= MAX_POINTS,
         "N={n} exceeds the DP limit of {MAX_POINTS}"
@@ -49,7 +53,7 @@ pub fn count_patterns_dp(n: usize, blocks: &[u32], max_length: usize) -> Vec<u64
         "max_length={max_length} must not exceed n={n}"
     );
 
-    let mut counts = vec![0u64; max_length + 1];
+    let mut counts = vec![0u128; max_length + 1];
     counts[0] = 1;
     if n == 0 || max_length == 0 {
         return counts;
@@ -66,7 +70,7 @@ pub fn count_patterns_dp(n: usize, blocks: &[u32], max_length: usize) -> Vec<u64
     for v in 0..n {
         dp[(1usize << v) * n + v] = 1;
     }
-    counts[1] = n as u64;
+    counts[1] = n as u128;
 
     // Enumerate masks in ascending order so all proper-subset states are
     // already populated by the time we reach `mask`. Masks whose length
@@ -98,7 +102,7 @@ pub fn count_patterns_dp(n: usize, blocks: &[u32], max_length: usize) -> Vec<u64
 
                 let blockers = blocks[end * n + next];
                 if mask & blockers == blockers {
-                    counts[len + 1] += ways;
+                    counts[len + 1] += u128::from(ways);
                     // Writes into the terminal layer would never be read,
                     // since masks of length `max_length` are skipped above.
                     if len + 1 < max_length {
@@ -148,7 +152,7 @@ mod tests {
         assert_eq!(counts[7], 72_912);
         assert_eq!(counts[8], 140_704);
         assert_eq!(counts[9], 140_704);
-        assert_eq!(counts[4..=9].iter().sum::<u64>(), 389_112);
+        assert_eq!(counts[4..=9].iter().sum::<u128>(), 389_112);
     }
 
     #[test]
@@ -195,7 +199,7 @@ mod tests {
         let blocks = compute_blocks(&g);
         let n = g.points.len();
         let counts = count_patterns_dp(n, &blocks, n);
-        assert_eq!(counts[4..=9].iter().sum::<u64>(), 389_112);
+        assert_eq!(counts[4..=9].iter().sum::<u128>(), 389_112);
     }
 
     #[test]
@@ -213,6 +217,27 @@ mod tests {
                 "truncated counts disagree with full run at cap={cap}"
             );
         }
+    }
+
+    // Regression test: with n=21 the sum of patterns exceeds u64::MAX (≈1.84×10¹⁹)
+    // because 21! ≈ 5.1×10¹⁹. Before the fix, counts used u64 and panicked with
+    // "attempt to add with overflow" on `grid 4x4 -f 5`.
+    // This test requires ~350 MB of DP table.
+    #[test]
+    #[ignore = "allocates ~350 MB — run manually with: cargo test -- --ignored"]
+    fn count_4x4_plus_5_free_does_not_overflow() {
+        let g = build_grid_definition(&[4, 4], 5);
+        let blocks = compute_blocks(&g);
+        let n = g.points.len();
+        assert_eq!(n, 21);
+        let counts = count_patterns_dp(n, &blocks, n);
+        // In a zero-blocker graph, counts[n] = n!; free points guarantee many
+        // paths exceed u64::MAX, so u128 is necessary.
+        assert!(
+            counts[n] > u128::from(u64::MAX),
+            "expected counts[21] to exceed u64::MAX but got {}",
+            counts[n]
+        );
     }
 
     #[test]
