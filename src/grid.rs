@@ -16,6 +16,8 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Upper bound on the number of nodes the program accepts.
@@ -35,8 +37,10 @@ pub struct GridDefinition {
 
 impl GridDefinition {
     /// # Errors
-    /// Returns an error if the point count exceeds [`MAX_POINTS`] or any point
-    /// does not have exactly [`GridDefinition::dimensions`] coordinates.
+    /// Returns an error if:
+    /// - the point count exceeds [`MAX_POINTS`],
+    /// - any point does not have exactly [`GridDefinition::dimensions`] coordinates, or
+    /// - two points share the same coordinates (duplicates are not allowed).
     pub fn validate(&self) -> Result<(), String> {
         let n = self.points.len();
         if n > MAX_POINTS {
@@ -52,6 +56,15 @@ impl GridDefinition {
                     expected = self.dimensions,
                 ));
             }
+        }
+        let mut seen: HashMap<&Vec<i32>, usize> = HashMap::new();
+        for (idx, point) in self.points.iter().enumerate() {
+            if let Some(&first) = seen.get(point) {
+                return Err(format!(
+                    "points {first} and {idx} have the same coordinates {point:?}"
+                ));
+            }
+            seen.insert(point, idx);
         }
         Ok(())
     }
@@ -203,8 +216,23 @@ mod tests {
 
     #[test]
     fn validate_accepts_exactly_max_points() {
-        let points = vec![vec![0i32, 0]; MAX_POINTS];
+        let points: Vec<Vec<i32>> = (0i32..).take(MAX_POINTS).map(|i| vec![i, 0]).collect();
         assert!(grid(2, points).validate().is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_duplicate_points() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![0, 0]]);
+        let err = g.validate().unwrap_err();
+        assert!(err.contains("points 0 and 2"), "unexpected error: {err}");
+        assert!(err.contains("[0, 0]"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_adjacent_duplicate_points() {
+        let g = grid(2, vec![vec![1, 2], vec![1, 2]]);
+        let err = g.validate().unwrap_err();
+        assert!(err.contains("points 0 and 1"), "unexpected error: {err}");
     }
 
     #[test]
