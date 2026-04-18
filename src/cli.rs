@@ -16,10 +16,12 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use std::error::Error;
 use std::fs;
+use std::io;
 use std::path::PathBuf;
 use std::time::Instant;
+
+use anyhow::{Result, anyhow};
 
 use clap::{Parser, Subcommand};
 
@@ -67,6 +69,23 @@ enum Command {
     },
 }
 
+const fn io_kind_str(kind: io::ErrorKind) -> &'static str {
+    match kind {
+        io::ErrorKind::NotFound => "not found",
+        io::ErrorKind::PermissionDenied => "permission denied",
+        io::ErrorKind::AlreadyExists => "already exists",
+        io::ErrorKind::WouldBlock => "operation would block",
+        io::ErrorKind::InvalidInput => "invalid input",
+        io::ErrorKind::TimedOut => "timed out",
+        io::ErrorKind::WriteZero => "write zero",
+        io::ErrorKind::Interrupted => "interrupted",
+        io::ErrorKind::ConnectionRefused => "connection refused",
+        io::ErrorKind::ConnectionReset => "connection reset",
+        io::ErrorKind::ConnectionAborted => "connection aborted",
+        _ => "I/O error",
+    }
+}
+
 fn run_pipeline(grid: &GridDefinition, quiet: bool) {
     let n = grid.points.len();
     let dim = grid.dimensions;
@@ -100,7 +119,7 @@ fn run_pipeline(grid: &GridDefinition, quiet: bool) {
 
 /// # Errors
 /// Propagates parse, I/O, and validation errors to the caller.
-pub fn run() -> Result<(), Box<dyn Error>> {
+pub fn run() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
@@ -110,7 +129,7 @@ pub fn run() -> Result<(), Box<dyn Error>> {
             export_json,
             quiet,
         } => {
-            let parsed = parse_dims(&dims)?;
+            let parsed = parse_dims(&dims).map_err(|e| anyhow!("{e}"))?;
             let grid = build_grid_definition(&parsed, free_points);
 
             if export_json {
@@ -118,13 +137,20 @@ pub fn run() -> Result<(), Box<dyn Error>> {
                 return Ok(());
             }
 
-            grid.validate()?;
+            grid.validate().map_err(|e| anyhow!("{e}"))?;
             run_pipeline(&grid, quiet);
         }
         Command::File { path, quiet } => {
-            let content = fs::read_to_string(&path)?;
-            let grid: GridDefinition = serde_json::from_str(&content)?;
-            grid.validate()?;
+            let content = fs::read_to_string(&path).map_err(|e| {
+                anyhow!(
+                    "could not open file \"{}\": {}",
+                    path.display(),
+                    io_kind_str(e.kind())
+                )
+            })?;
+            let grid: GridDefinition = serde_json::from_str(&content)
+                .map_err(|e| anyhow!("failed to parse JSON file \"{}\": {}", path.display(), e))?;
+            grid.validate().map_err(|e| anyhow!("{e}"))?;
             run_pipeline(&grid, quiet);
         }
     }
