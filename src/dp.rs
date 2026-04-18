@@ -23,25 +23,35 @@ use crate::grid::MAX_POINTS;
 /// `blocks[i * n + j]` must hold the bitmask of nodes that must already be
 /// visited before the move `i → j` is legal (see [`crate::grid::compute_blocks`]).
 ///
-/// Returns a `Vec<u64>` of length `n + 1` where `counts[k]` is the number of
-/// valid patterns of exactly `k` nodes. `counts[0] = 1` (the empty pattern).
+/// `max_length` bounds the pattern lengths considered: any prefix whose length
+/// reaches `max_length` is not extended, so the exponential inner work for
+/// longer prefixes is never performed.
+///
+/// Returns a `Vec<u64>` of length `max_length + 1` where `counts[k]` is the
+/// number of valid patterns of exactly `k` nodes. `counts[0] = 1` (the empty
+/// pattern).
 ///
 /// # Complexity
-/// - Time: `O(N² · 2ᴺ)`
-/// - Space: `O(N · 2ᴺ)`
+/// With `L = max_length`, extension work is bounded by the prefixes of length
+/// `< L`, so the runtime shrinks from the full `O(N² · 2ᴺ)` to
+/// `O(N² · Σ_{k<L} C(N, k))` when `L < N`.
 ///
 /// # Panics
-/// Panics if `n > MAX_POINTS` or `blocks.len() != n * n`.
-pub fn count_patterns_dp(n: usize, blocks: &[u32]) -> Vec<u64> {
+/// Panics if `n > MAX_POINTS`, `blocks.len() != n * n`, or `max_length > n`.
+pub fn count_patterns_dp(n: usize, blocks: &[u32], max_length: usize) -> Vec<u64> {
     assert!(
         n <= MAX_POINTS,
         "N={n} exceeds the DP limit of {MAX_POINTS}"
     );
     assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
+    assert!(
+        max_length <= n,
+        "max_length={max_length} must not exceed n={n}"
+    );
 
-    let mut counts = vec![0u64; n + 1];
+    let mut counts = vec![0u64; max_length + 1];
     counts[0] = 1;
-    if n == 0 {
+    if n == 0 || max_length == 0 {
         return counts;
     }
 
@@ -59,10 +69,15 @@ pub fn count_patterns_dp(n: usize, blocks: &[u32]) -> Vec<u64> {
     counts[1] = n as u64;
 
     // Enumerate masks in ascending order so all proper-subset states are
-    // already populated by the time we reach `mask`.
+    // already populated by the time we reach `mask`. Masks whose length
+    // already equals `max_length` cannot be extended into a counted pattern,
+    // so their inner loops are skipped entirely.
     for mask in 1u32..=full_mask {
-        let base = (mask as usize) * n;
         let len = mask.count_ones() as usize;
+        if len >= max_length {
+            continue;
+        }
+        let base = (mask as usize) * n;
 
         let mut visited = mask;
         while visited != 0 {
@@ -83,9 +98,13 @@ pub fn count_patterns_dp(n: usize, blocks: &[u32]) -> Vec<u64> {
 
                 let blockers = blocks[end * n + next];
                 if mask & blockers == blockers {
-                    let new_mask = (mask | next_bit) as usize;
-                    dp[new_mask * n + next] += ways;
                     counts[len + 1] += ways;
+                    // Writes into the terminal layer would never be read,
+                    // since masks of length `max_length` are skipped above.
+                    if len + 1 < max_length {
+                        let new_mask = (mask | next_bit) as usize;
+                        dp[new_mask * n + next] += ways;
+                    }
                 }
             }
         }
@@ -117,7 +136,8 @@ mod tests {
         );
         g.validate().unwrap();
         let blocks = compute_blocks(&g);
-        let counts = count_patterns_dp(g.points.len(), &blocks);
+        let n = g.points.len();
+        let counts = count_patterns_dp(n, &blocks, n);
 
         assert_eq!(counts[0], 1);
         assert_eq!(counts[1], 9);
@@ -136,7 +156,8 @@ mod tests {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
         let blocks = compute_blocks(&g);
         assert!(blocks.iter().all(|&b| b == 0));
-        let counts = count_patterns_dp(g.points.len(), &blocks);
+        let n = g.points.len();
+        let counts = count_patterns_dp(n, &blocks, n);
         assert_eq!(counts, vec![1, 4, 12, 24, 24]);
     }
 
@@ -144,7 +165,8 @@ mod tests {
     fn blocker_becomes_transparent_once_visited() {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
         let blocks = compute_blocks(&g);
-        let counts = count_patterns_dp(g.points.len(), &blocks);
+        let n = g.points.len();
+        let counts = count_patterns_dp(n, &blocks, n);
 
         assert_eq!(counts[1], 3);
         assert_eq!(counts[2], 4);
@@ -158,20 +180,62 @@ mod tests {
         empty.validate().unwrap();
         let blocks = compute_blocks(&empty);
         assert!(blocks.is_empty());
-        assert_eq!(count_patterns_dp(0, &blocks), vec![1]);
+        assert_eq!(count_patterns_dp(0, &blocks, 0), vec![1]);
 
         let single = grid(2, vec![vec![7, 7]]);
         single.validate().unwrap();
         let blocks = compute_blocks(&single);
         assert_eq!(blocks, vec![0]);
-        assert_eq!(count_patterns_dp(1, &blocks), vec![1, 1]);
+        assert_eq!(count_patterns_dp(1, &blocks, 1), vec![1, 1]);
     }
 
     #[test]
     fn generated_3x3_matches_known_pattern_counts() {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
-        let counts = count_patterns_dp(g.points.len(), &blocks);
+        let n = g.points.len();
+        let counts = count_patterns_dp(n, &blocks, n);
         assert_eq!(counts[4..=9].iter().sum::<u64>(), 389_112);
+    }
+
+    #[test]
+    fn max_length_truncates_counts_to_prefix_of_full_run() {
+        let g = build_grid_definition(&[3, 3], 0);
+        let blocks = compute_blocks(&g);
+        let n = g.points.len();
+        let full = count_patterns_dp(n, &blocks, n);
+        for cap in 0..=n {
+            let capped = count_patterns_dp(n, &blocks, cap);
+            assert_eq!(capped.len(), cap + 1, "unexpected length for cap={cap}");
+            assert_eq!(
+                capped.as_slice(),
+                &full[..=cap],
+                "truncated counts disagree with full run at cap={cap}"
+            );
+        }
+    }
+
+    #[test]
+    fn max_length_zero_on_nonempty_grid_returns_only_empty_pattern() {
+        let g = build_grid_definition(&[3, 3], 0);
+        let blocks = compute_blocks(&g);
+        let counts = count_patterns_dp(g.points.len(), &blocks, 0);
+        assert_eq!(counts, vec![1]);
+    }
+
+    #[test]
+    fn max_length_one_reports_only_singletons() {
+        let g = build_grid_definition(&[3, 3], 0);
+        let blocks = compute_blocks(&g);
+        let counts = count_patterns_dp(g.points.len(), &blocks, 1);
+        assert_eq!(counts, vec![1, 9]);
+    }
+
+    #[test]
+    fn max_length_four_matches_android_minimum_run() {
+        let g = build_grid_definition(&[3, 3], 0);
+        let blocks = compute_blocks(&g);
+        let counts = count_patterns_dp(g.points.len(), &blocks, 4);
+        assert_eq!(counts[4], 1_624);
     }
 }

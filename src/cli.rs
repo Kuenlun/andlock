@@ -23,7 +23,7 @@ use std::time::Instant;
 
 use anyhow::{Result, anyhow};
 
-use clap::{Parser, Subcommand};
+use clap::{Args, Parser, Subcommand};
 
 use crate::dp::count_patterns_dp;
 use crate::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
@@ -42,7 +42,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     /// Generate a rectangular grid on the fly and count its patterns.
-    /// Length 0 (the empty/null pattern) is counted as a valid pattern.
+    /// Length 0 (the empty/null pattern) is counted as a valid pattern unless `--min-length` excludes it.
     Grid {
         /// Axis sizes separated by 'x' (e.g. "3x3", "10", "2x3x2").
         dims: String,
@@ -55,20 +55,53 @@ enum Command {
         #[arg(long)]
         export_json: bool,
 
-        /// Suppress progress and timing output (results still printed to stdout).
-        #[arg(short, long)]
-        quiet: bool,
-    },
-    /// Load a `GridDefinition` from a JSON file and count its patterns (0–25 points).
-    /// Length 0 (the empty/null pattern) is counted as a valid pattern.
-    File {
-        /// Path to a JSON file containing a `GridDefinition`.
-        path: PathBuf,
+        #[command(flatten)]
+        range: RangeArgs,
 
         /// Suppress progress and timing output (results still printed to stdout).
         #[arg(short, long)]
         quiet: bool,
     },
+    /// Load a `GridDefinition` from a JSON file and count its patterns (0–25 points).
+    /// Length 0 (the empty/null pattern) is counted as a valid pattern unless `--min-length` excludes it.
+    File {
+        /// Path to a JSON file containing a `GridDefinition`.
+        path: PathBuf,
+
+        #[command(flatten)]
+        range: RangeArgs,
+
+        /// Suppress progress and timing output (results still printed to stdout).
+        #[arg(short, long)]
+        quiet: bool,
+    },
+}
+
+#[derive(Args)]
+struct RangeArgs {
+    /// Only include patterns with at least N points (e.g. `--min-length 4` matches Android's lock screen minimum). Defaults to 0, i.e. the empty pattern is shown.
+    #[arg(long, value_name = "N")]
+    min_length: Option<usize>,
+
+    /// Only include patterns with at most N points. The DP prunes longer prefixes, so a tight cap exponentially reduces runtime. Defaults to the total point count.
+    #[arg(long, value_name = "N")]
+    max_length: Option<usize>,
+}
+
+fn resolve_range(range: &RangeArgs, n: usize) -> Result<(usize, usize)> {
+    let min = range.min_length.unwrap_or(0);
+    let max = range.max_length.unwrap_or(n);
+    if max > n {
+        return Err(anyhow!(
+            "--max-length ({max}) exceeds the number of points ({n})"
+        ));
+    }
+    if min > max {
+        return Err(anyhow!(
+            "--min-length ({min}) must not exceed --max-length ({max})"
+        ));
+    }
+    Ok((min, max))
 }
 
 const fn io_kind_str(kind: io::ErrorKind) -> &'static str {
@@ -88,7 +121,7 @@ const fn io_kind_str(kind: io::ErrorKind) -> &'static str {
     }
 }
 
-fn run_pipeline(grid: &GridDefinition, quiet: bool) {
+fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, quiet: bool) {
     let n = grid.points.len();
     let dim = grid.dimensions;
     if !quiet {
@@ -103,11 +136,11 @@ fn run_pipeline(grid: &GridDefinition, quiet: bool) {
     }
 
     let t1 = Instant::now();
-    let counts = count_patterns_dp(n, &blocks);
+    let counts = count_patterns_dp(n, &blocks, max_length);
     let elapsed = t1.elapsed();
 
-    let total: u64 = counts.iter().sum();
-    for (k, c) in counts.iter().enumerate() {
+    let total: u64 = counts[min_length..=max_length].iter().sum();
+    for (k, c) in counts.iter().enumerate().skip(min_length) {
         if *c > 0 {
             if k == 0 {
                 println!("  Length {k:>2}: {c}  (empty/null pattern)");
@@ -133,6 +166,7 @@ pub fn run() -> Result<()> {
             dims,
             free_points,
             export_json,
+            range,
             quiet,
         } => {
             let parsed = parse_dims(&dims).map_err(|e| anyhow!("{e}"))?;
@@ -144,9 +178,10 @@ pub fn run() -> Result<()> {
             }
 
             grid.validate().map_err(|e| anyhow!("{e}"))?;
-            run_pipeline(&grid, quiet);
+            let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
+            run_pipeline(&grid, min_length, max_length, quiet);
         }
-        Command::File { path, quiet } => {
+        Command::File { path, range, quiet } => {
             let content = fs::read_to_string(&path).map_err(|e| {
                 anyhow!(
                     "could not open file \"{}\": {}",
@@ -157,7 +192,8 @@ pub fn run() -> Result<()> {
             let grid: GridDefinition = serde_json::from_str(&content)
                 .map_err(|e| anyhow!("failed to parse JSON file \"{}\": {}", path.display(), e))?;
             grid.validate().map_err(|e| anyhow!("{e}"))?;
-            run_pipeline(&grid, quiet);
+            let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
+            run_pipeline(&grid, min_length, max_length, quiet);
         }
     }
 
