@@ -44,7 +44,7 @@ enum Command {
         /// Axis sizes separated by 'x' (e.g. "3x3", "10", "2x3x2").
         dims: String,
 
-        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid).
+        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid). Total grid + free points must not exceed 25.
         #[arg(short = 'f', long, default_value_t = 0)]
         free_points: usize,
 
@@ -56,7 +56,7 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
     },
-    /// Load a `GridDefinition` from a JSON file and count its patterns.
+    /// Load a `GridDefinition` from a JSON file and count its patterns (maximum 25 points).
     File {
         /// Path to a JSON file containing a `GridDefinition`.
         path: PathBuf,
