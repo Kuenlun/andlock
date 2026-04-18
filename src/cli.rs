@@ -44,7 +44,7 @@ enum Command {
         /// Axis sizes separated by 'x' (e.g. "3x3", "10", "2x3x2").
         dims: String,
 
-        /// Number of free (non-collinear) points to append in orthogonal axes.
+        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid).
         #[arg(short = 'f', long, default_value_t = 0)]
         free_points: usize,
 
