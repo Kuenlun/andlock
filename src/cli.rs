@@ -28,6 +28,7 @@ use clap::{Args, Parser, Subcommand};
 
 use andlock::dp::count_patterns_dp;
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
+use andlock::simplifier::{compress_axes, translate_to_origin};
 
 #[derive(Parser)]
 #[command(
@@ -56,6 +57,10 @@ enum Command {
         #[arg(long)]
         export_json: bool,
 
+        /// Apply canonical-form simplification passes (translate to origin, compress axes) before exporting JSON. Only valid with `--export-json`.
+        #[arg(long, requires = "export_json")]
+        simplify: bool,
+
         #[command(flatten)]
         range: RangeArgs,
 
@@ -74,6 +79,10 @@ enum Command {
         /// Re-emit the loaded `GridDefinition` as pretty-printed JSON to stdout instead of counting patterns.
         #[arg(long)]
         export_json: bool,
+
+        /// Apply canonical-form simplification passes (translate to origin, compress axes) before exporting JSON. Only valid with `--export-json`.
+        #[arg(long, requires = "export_json")]
+        simplify: bool,
 
         #[command(flatten)]
         range: RangeArgs,
@@ -218,6 +227,7 @@ pub fn run() -> Result<()> {
             dims,
             free_points,
             export_json,
+            simplify,
             range,
             quiet,
         } => {
@@ -230,7 +240,12 @@ pub fn run() -> Result<()> {
                         "--min-length and --max-length have no effect with --export-json"
                     ));
                 }
-                println!("{}", serde_json::to_string_pretty(&grid)?);
+                let out = if simplify {
+                    compress_axes(&translate_to_origin(&grid))
+                } else {
+                    grid
+                };
+                println!("{}", serde_json::to_string_pretty(&out)?);
                 return Ok(());
             }
 
@@ -241,6 +256,7 @@ pub fn run() -> Result<()> {
         Command::File {
             path,
             export_json,
+            simplify,
             range,
             quiet,
         } => {
@@ -268,7 +284,12 @@ pub fn run() -> Result<()> {
                         "--min-length and --max-length have no effect with --export-json"
                     ));
                 }
-                println!("{}", serde_json::to_string_pretty(&grid)?);
+                let out = if simplify {
+                    compress_axes(&translate_to_origin(&grid))
+                } else {
+                    grid
+                };
+                println!("{}", serde_json::to_string_pretty(&out)?);
                 return Ok(());
             }
 
