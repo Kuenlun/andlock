@@ -27,6 +27,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use clap::{Args, Parser, Subcommand};
 
 use crate::json_format::pretty_compact_json;
+use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
 use andlock::dp::count_patterns_dp;
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
@@ -242,6 +243,10 @@ pub fn run() -> Result<()> {
 
             grid.validate().map_err(|e| anyhow!("{e}"))?;
             let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
+            if !quiet && let Some(preview) = render_preview(&grid, Some(free_points)) {
+                println!("{preview}");
+                println!();
+            }
             run_pipeline(&grid, min_length, max_length, quiet);
         }
         Command::File {
@@ -282,6 +287,10 @@ pub fn run() -> Result<()> {
 
             grid.validate().map_err(|e| anyhow!("{e}"))?;
             let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
+            if !quiet && let Some(preview) = render_preview(&grid, None) {
+                println!("{preview}");
+                println!();
+            }
             run_pipeline(&grid, min_length, max_length, quiet);
         }
     }

@@ -18,6 +18,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 mod cli;
 mod json_format;
+mod preview;
 
 fn main() -> anyhow::Result<()> {
     cli::run()
