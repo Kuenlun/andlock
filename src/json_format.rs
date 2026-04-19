@@ -27,7 +27,9 @@ fn format_value(value: &serde_json::Value, indent: usize) -> String {
     let pad = "  ".repeat(indent);
     let next = "  ".repeat(indent + 1);
     match value {
-        serde_json::Value::Array(arr) if arr.iter().all(serde_json::Value::is_number) => {
+        serde_json::Value::Array(arr)
+            if !arr.is_empty() && arr.iter().all(serde_json::Value::is_number) =>
+        {
             let items: Vec<String> = arr.iter().map(std::string::ToString::to_string).collect();
             format!("[{}]", items.join(", "))
         }
@@ -118,5 +120,30 @@ mod tests {
 
         let empty_object = serde_json::json!({});
         assert_eq!(pretty_compact_json(&empty_object).unwrap(), "{}");
+    }
+
+    #[test]
+    fn serialization_error_propagates() {
+        struct AlwaysFails;
+        impl serde::Serialize for AlwaysFails {
+            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+                Err(serde::ser::Error::custom("intentional failure"))
+            }
+        }
+        assert!(pretty_compact_json(&AlwaysFails).is_err());
+    }
+
+    #[test]
+    fn mixed_array_formats_multiline() {
+        let mixed = vec![
+            serde_json::json!({"a": 1}),
+            serde_json::json!(42),
+            serde_json::json!("string"),
+        ];
+        let output = pretty_compact_json(&mixed).unwrap();
+        assert!(
+            output.contains('\n'),
+            "mixed array should be multiline but got: {output}"
+        );
     }
 }
