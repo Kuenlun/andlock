@@ -178,6 +178,11 @@ fn generate_grid_points(dims: &[i32]) -> Vec<Vec<i32>> {
 ///
 /// Each free point gets its own orthogonal axis (zero-padded on all base axes),
 /// guaranteeing zero collinearity without any numeric tolerance.
+///
+/// The result is routed through [`crate::simplifier::canonicalize`] so that
+/// generated grids are always in the crate's canonical form — any two calls
+/// with the same arguments are byte-for-byte identical, and extending the
+/// canonical pipeline automatically updates what this function emits.
 #[must_use]
 pub fn build_grid_definition(dims: &[i32], free_points: usize) -> GridDefinition {
     let base_dim = dims.len();
@@ -197,10 +202,10 @@ pub fn build_grid_definition(dims: &[i32], free_points: usize) -> GridDefinition
         points.push(fp);
     }
 
-    GridDefinition {
+    crate::simplifier::canonicalize(&GridDefinition {
         dimensions: total_dim,
         points,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -363,24 +368,67 @@ mod tests {
     }
 
     #[test]
-    fn build_grid_without_free_points_matches_base() {
+    fn build_grid_without_free_points_is_centroid_anchored() {
+        // 3x3 grid: raw points are (0..3, 0..3); the centroid (1, 1) is itself a
+        // node, so canonicalisation translates it to the origin and axis GCDs
+        // remain 1.
         let g = build_grid_definition(&[3, 3], 0);
         assert_eq!(g.dimensions, 2);
         assert_eq!(g.points.len(), 9);
-        assert_eq!(g.points[0], vec![0, 0]);
-        assert_eq!(g.points[8], vec![2, 2]);
+        assert_eq!(g.points[0], vec![-1, -1]);
+        assert_eq!(g.points[4], vec![0, 0]);
+        assert_eq!(g.points[8], vec![1, 1]);
         g.validate().unwrap();
     }
 
     #[test]
     fn build_grid_with_free_points_promotes_to_orthogonal_axes() {
+        // The central base node (1, 1, 0, 0) is nearest the (9/11, 9/11, 1/11,
+        // 1/11) centroid so canonicalisation anchors there; free-point axes
+        // retain their unit spacing.
         let g = build_grid_definition(&[3, 3], 2);
         assert_eq!(g.dimensions, 4);
         assert_eq!(g.points.len(), 11);
-        assert_eq!(g.points[0], vec![0, 0, 0, 0]);
-        assert_eq!(g.points[8], vec![2, 2, 0, 0]);
-        assert_eq!(g.points[9], vec![0, 0, 1, 0]);
-        assert_eq!(g.points[10], vec![0, 0, 0, 1]);
+        assert_eq!(g.points[0], vec![-1, -1, 0, 0]);
+        assert_eq!(g.points[4], vec![0, 0, 0, 0]);
+        assert_eq!(g.points[8], vec![1, 1, 0, 0]);
+        assert_eq!(g.points[9], vec![-1, -1, 1, 0]);
+        assert_eq!(g.points[10], vec![-1, -1, 0, 1]);
         g.validate().unwrap();
+    }
+
+    #[test]
+    fn build_grid_is_deterministic_for_repeated_calls() {
+        let a = build_grid_definition(&[4, 2, 3], 1);
+        let b = build_grid_definition(&[4, 2, 3], 1);
+        assert_eq!(a.dimensions, b.dimensions);
+        assert_eq!(a.points, b.points);
+    }
+
+    #[test]
+    fn build_grid_always_emits_canonical_form() {
+        // Across a representative sweep of shapes, the generator must be a
+        // fixed point of the canonical pipeline — calling `canonicalize` on
+        // the result must not change it.
+        let shapes: &[(&[i32], usize)] = &[
+            (&[1], 0),
+            (&[2], 0),
+            (&[3, 3], 0),
+            (&[2, 2], 0),
+            (&[4, 3], 0),
+            (&[2, 3, 2], 0),
+            (&[3, 3], 1),
+            (&[3, 3], 2),
+            (&[2, 2, 2], 2),
+        ];
+        for &(dims, free) in shapes {
+            let g = build_grid_definition(dims, free);
+            let again = crate::simplifier::canonicalize(&g);
+            assert_eq!(
+                g.points, again.points,
+                "generator output was not canonical for dims={dims:?} free={free}"
+            );
+            assert_eq!(g.dimensions, again.dimensions);
+        }
     }
 }

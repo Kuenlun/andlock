@@ -29,6 +29,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::grid::GridDefinition;
 
+/// Runs every simplification pass in canonical order and returns the
+/// resulting grid.
+///
+/// This is the single source of truth for "what does *canonical form* mean"
+/// in this crate. Grid constructors and the CLI both funnel through here so
+/// that adding a new pass automatically propagates everywhere a canonical
+/// grid is expected.
+///
+/// The pipeline is a composition of individually idempotent, count-preserving
+/// passes, so the result is itself idempotent: `canonicalize(canonicalize(g))`
+/// has the same coordinates as `canonicalize(g)`.
+#[must_use]
+pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
+    compress_axes(&translate_to_origin(grid))
+}
+
 /// Step 1 — translate the pattern so that the node closest to its centroid
 /// lands at the origin.
 ///
@@ -326,6 +342,23 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn canonicalize_is_idempotent() {
+        for g in [scaled_shifted_3x3(), mixed_gcd_3d()] {
+            let once = canonicalize(&g);
+            let twice = canonicalize(&once);
+            assert_eq!(once.points, twice.points);
+            assert_eq!(once.dimensions, twice.dimensions);
+        }
+    }
+
+    #[test]
+    fn canonicalize_preserves_pattern_counts() {
+        for g in [scaled_shifted_3x3(), mixed_gcd_3d()] {
+            assert_eq!(counts_of(&canonicalize(&g)), counts_of(&g));
         }
     }
 

@@ -28,7 +28,7 @@ use clap::{Args, Parser, Subcommand};
 
 use andlock::dp::count_patterns_dp;
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
-use andlock::simplifier::{compress_axes, translate_to_origin};
+use andlock::simplifier::canonicalize;
 
 #[derive(Parser)]
 #[command(
@@ -53,13 +53,9 @@ enum Command {
         #[arg(short = 'f', long, default_value_t = 0)]
         free_points: usize,
 
-        /// Emit the generated `GridDefinition` as pretty JSON to stdout instead of counting patterns (use `> file.json` to save).
+        /// Emit the generated `GridDefinition` as pretty JSON to stdout instead of counting patterns (use `> file.json` to save). Generated grids are always emitted in canonical form.
         #[arg(long)]
         export_json: bool,
-
-        /// Apply canonical-form simplification passes (translate to origin, compress axes) before exporting JSON. Only valid with `--export-json`.
-        #[arg(long, requires = "export_json")]
-        simplify: bool,
 
         #[command(flatten)]
         range: RangeArgs,
@@ -227,7 +223,6 @@ pub fn run() -> Result<()> {
             dims,
             free_points,
             export_json,
-            simplify,
             range,
             quiet,
         } => {
@@ -240,12 +235,7 @@ pub fn run() -> Result<()> {
                         "--min-length and --max-length have no effect with --export-json"
                     ));
                 }
-                let out = if simplify {
-                    compress_axes(&translate_to_origin(&grid))
-                } else {
-                    grid
-                };
-                println!("{}", serde_json::to_string_pretty(&out)?);
+                println!("{}", serde_json::to_string_pretty(&grid)?);
                 return Ok(());
             }
 
@@ -284,11 +274,7 @@ pub fn run() -> Result<()> {
                         "--min-length and --max-length have no effect with --export-json"
                     ));
                 }
-                let out = if simplify {
-                    compress_axes(&translate_to_origin(&grid))
-                } else {
-                    grid
-                };
+                let out = if simplify { canonicalize(&grid) } else { grid };
                 println!("{}", serde_json::to_string_pretty(&out)?);
                 return Ok(());
             }
