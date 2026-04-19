@@ -179,7 +179,7 @@ fn generate_grid_points(dims: &[i32]) -> Vec<Vec<i32>> {
 /// Each free point gets its own orthogonal axis (zero-padded on all base axes),
 /// guaranteeing zero collinearity without any numeric tolerance.
 ///
-/// The result is routed through [`crate::simplifier::canonicalize`] so that
+/// The result is routed through [`crate::canonicalizer::canonicalize`] so that
 /// generated grids are always in the crate's canonical form — any two calls
 /// with the same arguments are byte-for-byte identical, and extending the
 /// canonical pipeline automatically updates what this function emits.
@@ -202,7 +202,7 @@ pub fn build_grid_definition(dims: &[i32], free_points: usize) -> GridDefinition
         points.push(fp);
     }
 
-    crate::simplifier::canonicalize(&GridDefinition {
+    crate::canonicalizer::canonicalize(&GridDefinition {
         dimensions: total_dim,
         points,
     })
@@ -423,7 +423,7 @@ mod tests {
         ];
         for &(dims, free) in shapes {
             let g = build_grid_definition(dims, free);
-            let again = crate::simplifier::canonicalize(&g);
+            let again = crate::canonicalizer::canonicalize(&g);
             assert_eq!(
                 g.points, again.points,
                 "generator output was not canonical for dims={dims:?} free={free}"

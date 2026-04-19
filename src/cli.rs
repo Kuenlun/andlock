@@ -26,9 +26,9 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use clap::{Args, Parser, Subcommand};
 
+use andlock::canonicalizer::canonicalize;
 use andlock::dp::count_patterns_dp;
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
-use andlock::simplifier::canonicalize;
 
 #[derive(Parser)]
 #[command(

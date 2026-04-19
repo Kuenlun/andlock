@@ -21,6 +21,6 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! counter and the geometric simplification passes — as independent
 //! modules so they can be reused and tested outside the CLI wrapper.
 
+pub mod canonicalizer;
 pub mod dp;
 pub mod grid;
-pub mod simplifier;

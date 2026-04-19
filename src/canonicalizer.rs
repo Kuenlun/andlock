@@ -16,30 +16,62 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-//! Pattern simplification passes.
+//! Canonical-form normalization for [`GridDefinition`] grids.
 //!
-//! Each pass takes a [`GridDefinition`] by reference and returns an owned
-//! [`GridDefinition`] that is *geometrically equivalent* to the input
-//! (identical collinearity, direction and visibility relationships) but has
-//! smaller coordinates. Because every pass has that same shape, outputs can
-//! be piped back through any simplifier — the same one or another — to form
-//! arbitrary chains.
+//! Two grids are *geometrically equivalent* when they share the same
+//! collinearity, direction, and visibility (skip-over) relationships — i.e.
+//! when one can be obtained from the other by integer translation and/or
+//! per-axis integer scaling.  The **canonical form** is the unique smallest
+//! representative of each equivalence class.
 //!
-//! All passes are idempotent: `f(f(g))` has the same coordinates as `f(g)`.
+//! # Canonicalization pipeline
+//!
+//! [`canonicalize`] applies two passes in sequence.
+//!
+//! ## Pass 1 — centroid-anchor translation ([`translate_to_origin`])
+//!
+//! The node closest to the centroid of the grid (the *centroid anchor*) is
+//! translated to the origin.  Translation is an isometry, so all geometric
+//! relationships are preserved verbatim.  Once the anchor sits at
+//! `(0, …, 0)`, the GCD calculation in pass 2 sees its coordinates as zeros
+//! and ignores them, which is correct: the GCD should be determined by the
+//! *relative* positions of the remaining nodes, not an arbitrary global
+//! offset.
+//!
+//! ## Pass 2 — per-axis GCD compression ([`compress_axes`])
+//!
+//! Each axis is compressed independently: the coordinates of all nodes along
+//! that axis are divided by their greatest common divisor.  This brings every
+//! axis to the coarsest integer lattice that still expresses the same relative
+//! spacings.
+//!
+//! Compressing axes independently is more aggressive than applying a single
+//! global GCD, because a global factor can only cancel what is common to
+//! *all* axes simultaneously, while per-axis factors cancel each dimension's
+//! slack separately.  The trade-off is that per-axis scaling does not preserve
+//! absolute angles: two segments at 45° may no longer be so after one axis is
+//! compressed more than the other.  This is intentional — the canonicalizer
+//! preserves *topological* equivalence (collinearity, direction, visibility),
+//! not metric equivalence.  A use case that requires angle preservation would
+//! need a single global GCD instead.
+//!
+//! # Properties
+//!
+//! | Property | Guarantee |
+//! |---|---|
+//! | Correctness | Pattern counts are identical before and after canonicalization. |
+//! | Idempotency | `canonicalize(canonicalize(g))` equals `canonicalize(g)`. |
+//! | Composability | Every pass has the shape `&GridDefinition → GridDefinition`, so passes can be freely chained and each pass's output is a valid input for any other. |
 
 use crate::grid::GridDefinition;
 
-/// Runs every simplification pass in canonical order and returns the
-/// resulting grid.
+/// Returns the canonical form of `grid` by running all normalization passes
+/// in order.
 ///
-/// This is the single source of truth for "what does *canonical form* mean"
-/// in this crate. Grid constructors and the CLI both funnel through here so
+/// This is the single source of truth for what *canonical form* means in
+/// this crate.  Grid constructors and the CLI both funnel through here so
 /// that adding a new pass automatically propagates everywhere a canonical
 /// grid is expected.
-///
-/// The pipeline is a composition of individually idempotent, count-preserving
-/// passes, so the result is itself idempotent: `canonicalize(canonicalize(g))`
-/// has the same coordinates as `canonicalize(g)`.
 #[must_use]
 pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
     compress_axes(&translate_to_origin(grid))
@@ -285,11 +317,11 @@ mod tests {
         }
     }
 
-    /// The core chainability contract: every simplifier accepts any other
-    /// simplifier's output (including its own) and every resulting chain is
-    /// still a valid [`GridDefinition`].
+    /// The core chainability contract: every pass accepts any other pass's
+    /// output (including its own) and every resulting chain is a valid
+    /// [`GridDefinition`].
     #[test]
-    fn simplifier_outputs_can_feed_every_simplifier() {
+    fn pass_outputs_can_feed_every_pass() {
         type Simplifier = fn(&GridDefinition) -> GridDefinition;
         const PASSES: &[Simplifier] = &[translate_to_origin, compress_axes];
 
@@ -313,13 +345,13 @@ mod tests {
         }
     }
 
-    /// Equivalence contract: running the counting pipeline on any simplified
+    /// Equivalence contract: running the counting pipeline on any canonicalized
     /// variant of a grid must yield exactly the same pattern counts as the
-    /// original. This covers every 1-, 2- and 3-step composition of the
-    /// available simplifiers on several fixtures, so each link in any chain
-    /// is checked to preserve the count.
+    /// original.  This covers every 1-, 2- and 3-step composition of the
+    /// available passes on several fixtures, so each link in any chain is
+    /// checked to preserve the count.
     #[test]
-    fn every_simplifier_chain_preserves_pattern_counts() {
+    fn every_pass_chain_preserves_pattern_counts() {
         type Simplifier = fn(&GridDefinition) -> GridDefinition;
         const PASSES: &[Simplifier] = &[translate_to_origin, compress_axes];
 
