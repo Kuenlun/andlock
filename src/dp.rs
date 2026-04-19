@@ -18,6 +18,22 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::grid::MAX_POINTS;
 
+/// Computes pattern counts when there are no visibility constraints.
+///
+/// When every `blocks[i * n + j] == 0` every move is unconditionally legal, so
+/// the number of valid patterns of length k is the falling factorial
+/// `P(n, k) = n! / (n-k)! = n × (n-1) × … × (n-k+1)`.
+fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
+    let mut counts = vec![0u128; max_length + 1];
+    counts[0] = 1;
+    let mut perm: u128 = 1;
+    for (k, slot) in counts.iter_mut().enumerate().skip(1) {
+        perm *= (n - k + 1) as u128;
+        *slot = perm;
+    }
+    counts
+}
+
 /// Counts every valid pattern via bottom-up bitmask dynamic programming.
 ///
 /// `blocks[i * n + j]` must hold the bitmask of nodes that must already be
@@ -57,6 +73,10 @@ pub fn count_patterns_dp(
         max_length <= n,
         "max_length={max_length} must not exceed n={n}"
     );
+
+    if blocks.iter().all(|&b| b == 0) {
+        return count_unconstrained(n, max_length);
+    }
 
     let mut counts = vec![0u128; max_length + 1];
     counts[0] = 1;
@@ -302,5 +322,60 @@ mod tests {
         let blocks = compute_blocks(&g);
         let counts = count_patterns_dp(g.points.len(), &blocks, 4, || {});
         assert_eq!(counts[4], 1_624);
+    }
+
+    // Verify the closed-form formula P(n,k) = n!/(n-k)! is mathematically
+    // correct for n = 0..=7 by checking against the falling-factorial definition.
+    #[test]
+    fn unconstrained_formula_is_falling_factorial() {
+        for n in 0..=7usize {
+            let zero_blocks = vec![0u32; n * n];
+            let counts = count_patterns_dp(n, &zero_blocks, n, || {});
+            assert_eq!(counts.len(), n + 1);
+
+            let mut expected = vec![0u128; n + 1];
+            expected[0] = 1;
+            let mut perm = 1u128;
+            for (k, slot) in expected.iter_mut().enumerate().skip(1) {
+                perm *= (n - k + 1) as u128;
+                *slot = perm;
+            }
+            assert_eq!(counts, expected, "n={n}");
+        }
+    }
+
+    // For a grid with no collinear triplets the fast path must fire and must
+    // produce the same counts that the DP previously returned (regression guard).
+    #[test]
+    fn fast_path_matches_known_dp_result_for_unconstrained_grid() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
+        let blocks = compute_blocks(&g);
+        assert!(
+            blocks.iter().all(|&b| b == 0),
+            "expected zero block matrix for a square grid"
+        );
+        let n = g.points.len();
+        let counts = count_patterns_dp(n, &blocks, n, || {});
+        // P(4, k) for k=0..4: [1, 4, 12, 24, 24]
+        assert_eq!(counts, vec![1, 4, 12, 24, 24]);
+    }
+
+    // For a grid with collinear points the fast path must NOT fire; the DP
+    // result must differ from the unconstrained formula.
+    #[test]
+    fn constrained_grid_does_not_use_fast_path() {
+        // Three collinear points: node 1 blocks 0→2 and 2→0.
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
+        let blocks = compute_blocks(&g);
+        assert!(
+            blocks.iter().any(|&b| b != 0),
+            "expected non-zero block matrix for collinear points"
+        );
+        let n = g.points.len();
+        let counts = count_patterns_dp(n, &blocks, n, || {});
+        // Constrained: only 4 valid length-3 patterns, not 3! = 6.
+        assert_eq!(counts[3], 4);
+        // Unconstrained formula would give P(3,3) = 6.
+        assert_ne!(counts[3], 6);
     }
 }
