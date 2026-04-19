@@ -54,3 +54,69 @@ fn format_value(value: &serde_json::Value, indent: usize) -> String {
         other => other.to_string(),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_array_formats_inline() {
+        let nums = vec![1, 2, 3];
+        let output = pretty_compact_json(&nums).unwrap();
+        assert_eq!(output, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn object_array_formats_multiline() {
+        let objects = vec![serde_json::json!({"a": 1}), serde_json::json!({"b": 2})];
+        let output = pretty_compact_json(&objects).unwrap();
+        assert!(
+            output.contains('\n'),
+            "expected multiline output but got: {output}"
+        );
+        assert!(
+            output.contains("  \"a\""),
+            "expected indented key but got: {output}"
+        );
+    }
+
+    #[test]
+    fn nested_object_indents_correctly() {
+        let nested = serde_json::json!({"outer": {"inner": 42}});
+        let output = pretty_compact_json(&nested).unwrap();
+        assert!(
+            output.contains("    \"inner\""),
+            "expected 4-space indentation for nested key but got: {output}"
+        );
+    }
+
+    #[test]
+    fn output_is_valid_json_roundtrip() {
+        let original = serde_json::json!({"nums": [1, 2], "obj": {"x": true}});
+        let pretty = pretty_compact_json(&original).unwrap();
+        let reparsed: serde_json::Value =
+            serde_json::from_str(&pretty).expect("formatted output must be valid JSON");
+        assert_eq!(original, reparsed);
+    }
+
+    #[test]
+    fn primitive_values_format_without_modification() {
+        assert_eq!(pretty_compact_json(&"hello").unwrap(), "\"hello\"");
+        assert_eq!(pretty_compact_json(&42).unwrap(), "42");
+        assert_eq!(pretty_compact_json(&true).unwrap(), "true");
+        assert_eq!(
+            pretty_compact_json(&serde_json::Value::Null).unwrap(),
+            "null"
+        );
+    }
+
+    #[test]
+    fn empty_containers_remain_compact() {
+        let empty_array: Vec<i32> = vec![];
+        assert_eq!(pretty_compact_json(&empty_array).unwrap(), "[]");
+
+        let empty_object = serde_json::json!({});
+        assert_eq!(pretty_compact_json(&empty_object).unwrap(), "{}");
+    }
+}
