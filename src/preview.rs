@@ -192,3 +192,270 @@ fn attach_free_points(rows: &mut [String], n_free: usize, grid_rows: usize) {
         }
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+mod tests {
+    use super::*;
+    use andlock::grid::GridDefinition;
+
+    fn grid(dimensions: usize, points: Vec<Vec<i32>>) -> GridDefinition {
+        GridDefinition { dimensions, points }
+    }
+
+    // --- detect_free_dims ---
+
+    #[test]
+    fn detect_free_dims_returns_zero_for_plain_base_grid() {
+        // No trailing dimension has the "exactly one 1" signature.
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![1, 1]]);
+        assert_eq!(detect_free_dims(&g), 0);
+    }
+
+    #[test]
+    fn detect_free_dims_counts_contiguous_trailing_unit_axes() {
+        // Dims 2 and 3 each carry exactly one `1`; dims 0–1 do not → count = 2.
+        let g = grid(
+            4,
+            vec![
+                vec![0, 0, 0, 0],
+                vec![1, 0, 0, 0],
+                vec![0, 0, 1, 0],
+                vec![0, 0, 0, 1],
+            ],
+        );
+        assert_eq!(detect_free_dims(&g), 2);
+    }
+
+    #[test]
+    fn detect_free_dims_stops_at_first_non_matching_dim() {
+        // Dim 2 (last) matches; dim 1 has two `1`s → scan stops → count = 1.
+        #[rustfmt::skip]
+        let g = grid(
+            3,
+            vec![
+                vec![0, 0, 0],
+                vec![1, 0, 0],
+                vec![0, 1, 0],
+                vec![0, 1, 1],
+            ],
+        );
+        assert_eq!(detect_free_dims(&g), 1);
+    }
+
+    // --- render_preview: None cases ---
+
+    #[test]
+    fn render_preview_returns_none_for_3d_base_grid() {
+        #[rustfmt::skip]
+        let g = grid(
+            3,
+            vec![
+                vec![0, 0, 0],
+                vec![1, 0, 0],
+                vec![0, 1, 0],
+                vec![0, 0, 1],
+            ],
+        );
+        assert!(render_preview(&g, Some(0)).is_none());
+    }
+
+    #[test]
+    fn render_preview_returns_none_for_empty_base_without_free_points() {
+        assert!(render_preview(&grid(2, vec![]), Some(0)).is_none());
+    }
+
+    #[test]
+    fn render_preview_returns_none_when_column_count_exceeds_limit() {
+        // 41 distinct x-values exceeds MAX_DISPLAY_COLS (40).
+        let points: Vec<Vec<i32>> = (0..=40_i32).map(|x| vec![x, 0]).collect();
+        assert!(render_preview(&grid(2, points), Some(0)).is_none());
+    }
+
+    #[test]
+    fn render_preview_returns_none_when_row_count_exceeds_limit() {
+        // 21 distinct y-values exceeds MAX_DISPLAY_ROWS (20).
+        let points: Vec<Vec<i32>> = (0..=20_i32).map(|y| vec![0, y]).collect();
+        assert!(render_preview(&grid(2, points), Some(0)).is_none());
+    }
+
+    // --- render_preview: 0D base (stars only) ---
+
+    #[test]
+    fn render_preview_0d_base_with_free_points_shows_only_stars() {
+        // No base dimensions; 3 free points → "★ ★ ★".
+        let g = grid(3, vec![vec![1, 0, 0], vec![0, 1, 0], vec![0, 0, 1]]);
+        assert_eq!(render_preview(&g, Some(3)).unwrap(), "★ ★ ★");
+    }
+
+    // --- render_preview: 1D base ---
+
+    #[test]
+    fn render_preview_single_node_1d_grid() {
+        assert_eq!(
+            render_preview(&grid(1, vec![vec![0]]), Some(0)).unwrap(),
+            "●"
+        );
+    }
+
+    #[test]
+    fn render_preview_1d_three_node_line() {
+        let g = grid(1, vec![vec![-1], vec![0], vec![1]]);
+        assert_eq!(render_preview(&g, Some(0)).unwrap(), "● ● ●");
+    }
+
+    // --- render_preview: 2D base ---
+
+    #[test]
+    fn render_preview_2d_2x2_fully_filled() {
+        // ys descending → top row y=1, bottom row y=0.
+        let g = grid(2, vec![vec![0, 0], vec![0, 1], vec![1, 0], vec![1, 1]]);
+        assert_eq!(render_preview(&g, Some(0)).unwrap(), "● ●\n● ●");
+    }
+
+    #[test]
+    fn render_preview_2d_3x3_fully_filled() {
+        let g = grid(
+            2,
+            vec![
+                vec![-1, -1],
+                vec![-1, 0],
+                vec![-1, 1],
+                vec![0, -1],
+                vec![0, 0],
+                vec![0, 1],
+                vec![1, -1],
+                vec![1, 0],
+                vec![1, 1],
+            ],
+        );
+        assert_eq!(render_preview(&g, Some(0)).unwrap(), "● ● ●\n● ● ●\n● ● ●");
+    }
+
+    #[test]
+    fn render_preview_2d_sparse_grid_renders_gaps_as_spaces() {
+        // Corners + centre of a 3×3; the four edge midpoints are absent.
+        // xs=[-1,0,1], ys=[1,0,-1]:
+        //   y= 1 → ●   ●
+        //   y= 0 →   ●
+        //   y=-1 → ●   ●
+        let g = grid(
+            2,
+            vec![
+                vec![-1, -1],
+                vec![-1, 1],
+                vec![0, 0],
+                vec![1, -1],
+                vec![1, 1],
+            ],
+        );
+        let result = render_preview(&g, Some(0)).unwrap();
+        let rows: Vec<&str> = result.split('\n').collect();
+        assert_eq!(rows.len(), 3);
+        assert!(rows[0].starts_with('●') && rows[0].ends_with('●'));
+        assert!(rows[1].contains('●') && rows[1].starts_with(' '));
+        assert!(rows[2].starts_with('●') && rows[2].ends_with('●'));
+    }
+
+    // --- render_preview: free-point attachment ---
+
+    #[test]
+    fn render_preview_single_free_point_appended_to_1d_grid() {
+        // 1D base (3 nodes) + 1 free point → star appended to the sole row.
+        let g = grid(2, vec![vec![-1, 0], vec![0, 0], vec![1, 0], vec![0, 1]]);
+        let result = render_preview(&g, Some(1)).unwrap();
+        assert!(result.contains("● ● ●"));
+        assert!(result.ends_with('★'));
+        assert_eq!(result.chars().filter(|&c| c == '★').count(), 1);
+    }
+
+    #[test]
+    fn render_preview_free_point_centered_in_tall_grid() {
+        // 2D base with 3 rows + 1 free point: top_pad=(3-1)/2=1 → star on middle row.
+        let g = grid(
+            3,
+            vec![vec![0, 0, 0], vec![0, 1, 0], vec![0, 2, 0], vec![0, 0, 1]],
+        );
+        let rows: Vec<String> = render_preview(&g, Some(1))
+            .unwrap()
+            .split('\n')
+            .map(String::from)
+            .collect();
+        assert_eq!(rows.len(), 3);
+        assert!(!rows[0].contains('★'), "top row should not have a star");
+        assert!(rows[1].contains('★'), "middle row should have the star");
+        assert!(!rows[2].contains('★'), "bottom row should not have a star");
+    }
+
+    #[test]
+    fn render_preview_excess_free_points_wrap_across_columns() {
+        // 1D base (2 nodes → 1 grid row) + 4 free points:
+        // num_star_cols=4, all stars land on the single row → no newline.
+        let g = grid(
+            6,
+            vec![
+                vec![0, 0, 0, 0, 0, 0],
+                vec![1, 0, 0, 0, 0, 0],
+                vec![0, 0, 1, 0, 0, 0],
+                vec![0, 0, 0, 1, 0, 0],
+                vec![0, 0, 0, 0, 1, 0],
+                vec![0, 0, 0, 0, 0, 1],
+            ],
+        );
+        let result = render_preview(&g, Some(4)).unwrap();
+        assert_eq!(result.chars().filter(|&c| c == '★').count(), 4);
+        assert!(
+            !result.contains('\n'),
+            "all stars should collapse onto one row"
+        );
+    }
+
+    // --- attach_free_points: partial last column ---
+
+    #[test]
+    fn attach_free_points_partial_last_column_breaks_early() {
+        // grid_rows=3, n_free=4 → num_star_cols=2.
+        // Column 1: star_idx for rows 0,1,2 = 3,4,5.
+        // Row 0: 3 < 4 → star. Row 1: 4 >= 4 → break. Row 2: never reached.
+        // Expected star counts: row0=2, row1=1, row2=1.
+        let mut rows = vec![String::new(), String::new(), String::new()];
+        attach_free_points(&mut rows, 4, 3);
+        assert_eq!(rows[0].chars().filter(|&c| c == '★').count(), 2);
+        assert_eq!(rows[1].chars().filter(|&c| c == '★').count(), 1);
+        assert_eq!(rows[2].chars().filter(|&c| c == '★').count(), 1);
+    }
+
+    // --- auto-detect path (known_free_dims = None) ---
+
+    #[test]
+    fn render_preview_auto_detects_no_free_dims_for_plain_grid() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![0, 1], vec![1, 1]]);
+        assert!(render_preview(&g, None).is_some());
+    }
+
+    #[test]
+    fn render_preview_auto_detect_matches_explicit_for_canonical_grid() {
+        // For a canonical generated grid, the auto-detect path and the
+        // explicit-zero-free-dims path must produce identical output.
+        let g = andlock::grid::build_grid_definition(&[3, 3], 0);
+        assert_eq!(render_preview(&g, None), render_preview(&g, Some(0)));
+    }
+
+    #[test]
+    fn render_preview_auto_detect_matches_explicit_for_grid_with_free_dims() {
+        // Dims 2 and 3 each carry exactly one `1` → detect_free_dims returns 2.
+        // Auto-detect must use the structural filter (v == 0) to separate the two
+        // base points from the two free points, matching the positional split done
+        // by the explicit Some(2) path.
+        let g = grid(
+            4,
+            vec![
+                vec![0, 0, 0, 0],
+                vec![1, 0, 0, 0],
+                vec![0, 0, 1, 0],
+                vec![0, 0, 0, 1],
+            ],
+        );
+        assert_eq!(render_preview(&g, None), render_preview(&g, Some(2)));
+    }
+}
