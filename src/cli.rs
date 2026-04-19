@@ -26,6 +26,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use clap::{Args, Parser, Subcommand};
 
+use crate::json_format::pretty_compact_json;
 use andlock::canonicalizer::canonicalize;
 use andlock::dp::count_patterns_dp;
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
@@ -235,7 +236,7 @@ pub fn run() -> Result<()> {
                         "--min-length and --max-length have no effect with --export-json"
                     ));
                 }
-                println!("{}", serde_json::to_string_pretty(&grid)?);
+                println!("{}", pretty_compact_json(&grid)?);
                 return Ok(());
             }
 
@@ -275,7 +276,7 @@ pub fn run() -> Result<()> {
                     ));
                 }
                 let out = if simplify { canonicalize(&grid) } else { grid };
-                println!("{}", serde_json::to_string_pretty(&out)?);
+                println!("{}", pretty_compact_json(&out)?);
                 return Ok(());
             }
 
