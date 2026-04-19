@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.1](https://github.com/Kuenlun/andlock/compare/v0.2.0...v0.2.1) - 2026-04-19
+
+### Added
+
+- *(cli)* render terminal grid preview before pattern enumeration ([#10](https://github.com/Kuenlun/andlock/pull/10))
+- introduce compact JSON export format with inline numeric arrays ([#8](https://github.com/Kuenlun/andlock/pull/8))
+- introduce pattern-simplifier library with canonical-form normalization ([#5](https://github.com/Kuenlun/andlock/pull/5))
+
+### Fixed
+
+- support zero-sized grid dimensions ([#6](https://github.com/Kuenlun/andlock/pull/6))
+
+### Other
+
+- use closed-form formula for unconstrained pattern counting ([#9](https://github.com/Kuenlun/andlock/pull/9))
+
 ## [0.2.0](https://github.com/Kuenlun/andlock/compare/v0.1.0...v0.2.0) - 2026-04-18
 
 ### Added
