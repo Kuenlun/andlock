@@ -11,17 +11,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- *(cli)* render terminal grid preview before pattern enumeration ([#10](https://github.com/Kuenlun/andlock/pull/10))
-- introduce compact JSON export format with inline numeric arrays ([#8](https://github.com/Kuenlun/andlock/pull/8))
-- introduce pattern-simplifier library with canonical-form normalization ([#5](https://github.com/Kuenlun/andlock/pull/5))
+- _(cli)_ Render a terminal grid preview using `●` (nodes) and `★` (free points) before pattern enumeration; silently skipped for 3D+ base grids or grids larger than 40×20 ([#10](https://github.com/Kuenlun/andlock/pull/10))
+- Compact JSON export format: numeric arrays stay on one line while objects use multiline indentation, improving readability of `--export-json` output ([#8](https://github.com/Kuenlun/andlock/pull/8))
+- `pattern-simplifier` library crate with canonical-form normalization (`translate_to_origin` + `compress_axes`) exposed as a reusable public API; `file --simplify --export-json` outputs canonical-form JSON ([#5](https://github.com/Kuenlun/andlock/pull/5))
+
+### Changed
+
+- Extract algorithmic modules (`dp`, `grid`, `canonicalizer`) into a library crate; `main.rs` is now a thin CLI entry point over `lib.rs` ([#5](https://github.com/Kuenlun/andlock/pull/5))
+- `grid --export-json` now always outputs canonical-form JSON (origin-anchored, GCD-compressed axes); no `--simplify` flag needed ([#5](https://github.com/Kuenlun/andlock/pull/5))
+- Use closed-form falling-factorial formula `P(n,k) = n!/(n-k)!` for unconstrained grids (zero block matrix), reducing pattern counting from O(n·2ⁿ) to O(n) ([#9](https://github.com/Kuenlun/andlock/pull/9))
 
 ### Fixed
 
-- support zero-sized grid dimensions ([#6](https://github.com/Kuenlun/andlock/pull/6))
-
-### Other
-
-- use closed-form formula for unconstrained pattern counting ([#9](https://github.com/Kuenlun/andlock/pull/9))
+- Support zero-sized grid dimensions (e.g. `"0x3"`, `"0x0x1"`): any dimension of 0 yields 0 grid points and only the empty pattern, matching NumPy array semantics ([#6](https://github.com/Kuenlun/andlock/pull/6))
 
 ## [0.2.0](https://github.com/Kuenlun/andlock/compare/v0.1.0...v0.2.0) - 2026-04-18
 
