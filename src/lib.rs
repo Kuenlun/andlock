@@ -16,8 +16,11 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-mod cli;
+//! Core library for the `andlock` binary. Exposes the algorithmic pieces —
+//! grid construction, block-matrix derivation, the dynamic-programming
+//! counter and the geometric simplification passes — as independent
+//! modules so they can be reused and tested outside the CLI wrapper.
 
-fn main() -> anyhow::Result<()> {
-    cli::run()
-}
+pub mod canonicalizer;
+pub mod dp;
+pub mod grid;
