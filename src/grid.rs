@@ -122,11 +122,14 @@ pub fn compute_blocks(grid: &GridDefinition) -> Vec<u32> {
     blocks
 }
 
-/// Parses a dimension spec like `"3x3"`, `"10"`, or `"2x3x2"` into axis sizes.
+/// Parses a dimension spec like `"3x3"`, `"10"`, `"0x0x1"`, or `"2x3x2"` into axis sizes.
+///
+/// A component of `0` means that axis has no points; any spec containing `0`
+/// produces an empty grid (the only valid pattern is the empty one).
 ///
 /// # Errors
 /// Returns an error if the spec is empty, contains a non-integer component,
-/// or contains a component less than `1`.
+/// or contains a negative component.
 pub fn parse_dims(spec: &str) -> Result<Vec<i32>, String> {
     if spec.is_empty() {
         return Err("dimensions string must not be empty".into());
@@ -136,11 +139,11 @@ pub fn parse_dims(spec: &str) -> Result<Vec<i32>, String> {
         .split('x')
         .map(|part| {
             let value: i32 = part.parse().map_err(|_| {
-                format!("invalid dimension component '{part}': expected a positive integer")
+                format!("invalid dimension component '{part}': expected a non-negative integer")
             })?;
-            if value < 1 {
+            if value < 0 {
                 return Err(format!(
-                    "invalid dimension component '{part}': must be >= 1"
+                    "invalid dimension component '{part}': must be >= 0"
                 ));
             }
             Ok(value)
@@ -333,8 +336,9 @@ mod tests {
     }
 
     #[test]
-    fn parse_dims_rejects_zero_component() {
-        assert!(parse_dims("3x0x2").is_err());
+    fn parse_dims_accepts_zero_component() {
+        assert_eq!(parse_dims("0").unwrap(), vec![0]);
+        assert_eq!(parse_dims("3x0x2").unwrap(), vec![3, 0, 2]);
     }
 
     #[test]
@@ -346,6 +350,14 @@ mod tests {
     fn parse_dims_rejects_empty_component() {
         assert!(parse_dims("3x").is_err());
         assert!(parse_dims("x3").is_err());
+    }
+
+    #[test]
+    fn build_grid_with_zero_dimension_produces_empty_grid() {
+        let g = build_grid_definition(&[0, 0, 1], 0);
+        assert_eq!(g.dimensions, 3);
+        assert!(g.points.is_empty());
+        g.validate().unwrap();
     }
 
     #[test]
