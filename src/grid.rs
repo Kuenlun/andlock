@@ -29,7 +29,7 @@ use serde::{Deserialize, Serialize};
 pub const MAX_POINTS: usize = 25;
 
 /// Finite set of integer-coordinate nodes in `dimensions`-dimensional space.
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct GridDefinition {
     pub dimensions: usize,
     pub points: Vec<Vec<i32>>,
@@ -74,6 +74,7 @@ impl GridDefinition {
 /// bitmask of nodes lying strictly on the open segment `(a, b)`.
 ///
 /// The matrix is symmetric: `blocks[a * n + b] == blocks[b * n + a]`.
+#[must_use]
 pub fn compute_blocks(grid: &GridDefinition) -> Vec<u32> {
     let n = grid.points.len();
     let dim = grid.dimensions;
@@ -177,6 +178,7 @@ fn generate_grid_points(dims: &[i32]) -> Vec<Vec<i32>> {
 ///
 /// Each free point gets its own orthogonal axis (zero-padded on all base axes),
 /// guaranteeing zero collinearity without any numeric tolerance.
+#[must_use]
 pub fn build_grid_definition(dims: &[i32], free_points: usize) -> GridDefinition {
     let base_dim = dims.len();
     let total_dim = base_dim + free_points;

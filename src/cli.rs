@@ -26,8 +26,8 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use clap::{Args, Parser, Subcommand};
 
-use crate::dp::count_patterns_dp;
-use crate::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
+use andlock::dp::count_patterns_dp;
+use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
 
 #[derive(Parser)]
 #[command(
