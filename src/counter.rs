@@ -31,6 +31,63 @@ pub enum DpEvent {
     LengthDone { length: usize, count: u128 },
 }
 
+/// Which counting algorithm to use.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Algorithm {
+    /// Bottom-up bitmask DP — fast but allocates a `2ⁿ × n × 16`-byte table.
+    Dp,
+    /// Explicit DFS — slow but uses only `O(n)` memory.
+    Dfs,
+}
+
+/// Returns the number of bytes the DP table would occupy for `n` nodes.
+///
+/// Formula: `2ⁿ × n × 16` (each of the `2ⁿ × n` entries is a `u128`).
+/// Uses saturating arithmetic so callers can safely pass any `n`.
+#[must_use]
+pub fn dp_table_bytes(n: usize) -> u64 {
+    (1u64 << n.min(63))
+        .saturating_mul(n as u64)
+        .saturating_mul(16)
+}
+
+/// Returns [`Algorithm::Dp`] if the DP table fits within `memory_budget`
+/// bytes, otherwise [`Algorithm::Dfs`].
+#[must_use]
+pub fn choose_algorithm(n: usize, memory_budget: u64) -> Algorithm {
+    if dp_table_bytes(n) <= memory_budget {
+        Algorithm::Dp
+    } else {
+        Algorithm::Dfs
+    }
+}
+
+/// Counts every valid pattern, routing to DP or DFS based on `algorithm`.
+///
+/// The `on_tick` callback is invoked once per outer-loop step: once per
+/// bitmask for DP (up to `2ⁿ − 1` calls) or once per starting node for DFS
+/// (up to `n` calls). Per-length streaming is not available through this
+/// interface; use [`count_patterns_dp`] directly for [`DpEvent::LengthDone`].
+///
+/// # Panics
+/// Panics under the same conditions as the underlying algorithm.
+pub fn count_patterns(
+    n: usize,
+    blocks: &[u32],
+    max_length: usize,
+    algorithm: Algorithm,
+    on_tick: impl Fn(),
+) -> Vec<u128> {
+    match algorithm {
+        Algorithm::Dp => count_patterns_dp(n, blocks, max_length, |event| {
+            if matches!(event, DpEvent::Mask) {
+                on_tick();
+            }
+        }),
+        Algorithm::Dfs => count_patterns_dfs(n, blocks, max_length, on_tick),
+    }
+}
+
 /// Next bitmask with the same popcount as `x` (Gosper's hack).
 ///
 /// Used to enumerate masks in popcount-ascending order so that each popcount
@@ -87,10 +144,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
     max_length: usize,
     mut on_event: F,
 ) -> Vec<u128> {
-    assert!(
-        n <= MAX_POINTS,
-        "N={n} exceeds the DP limit of {MAX_POINTS}"
-    );
+    assert!(n <= MAX_POINTS, "N={n} exceeds the maximum of {MAX_POINTS}");
     assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
     assert!(
         max_length <= n,

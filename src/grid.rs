@@ -20,13 +20,14 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Upper bound on the number of nodes the program accepts.
+/// Hard upper bound on the number of nodes the program accepts.
 ///
-/// [`crate::counter::count_patterns_dp`] represents the visited set with a `u32` bitmask and
-/// allocates a `2ⁿ × n` table of `u128` counts. At `n = 25` the table already
-/// reaches ~13.4 GiB, which we treat as the ceiling of what is realistic to
-/// run on a workstation.
-pub const MAX_POINTS: usize = 25;
+/// Both algorithms represent the visited set as a `u32` bitmask, so
+/// `1u32 << n` must not overflow — limiting `n` to at most 31.
+/// The algorithm router in [`crate::counter`] chooses between the DP and DFS
+/// implementations at runtime based on available system memory, so there is no
+/// longer a fixed memory-based ceiling.
+pub const MAX_POINTS: usize = 31;
 
 /// Finite set of integer-coordinate nodes in `dimensions`-dimensional space.
 #[derive(Clone, Serialize, Deserialize)]

@@ -21,6 +21,8 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use sysinfo::System;
+
 use anyhow::{Result, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -29,7 +31,9 @@ use clap::{Args, Parser, Subcommand};
 use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
-use andlock::counter::{DpEvent, count_patterns_dp};
+use andlock::counter::{
+    Algorithm, DpEvent, choose_algorithm, count_patterns_dfs, count_patterns_dp,
+};
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
 
 #[derive(Parser)]
@@ -51,7 +55,7 @@ enum Command {
         /// Axis sizes separated by 'x' (e.g. "3x3", "10", "2x3x2").
         dims: String,
 
-        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid). Total grid + free points must not exceed 25.
+        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid). Total grid + free points must not exceed 31.
         #[arg(short = 'f', long, default_value_t = 0)]
         free_points: usize,
 
@@ -66,7 +70,7 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
     },
-    /// Load a `GridDefinition` from a JSON file and count its patterns (0–25 points).
+    /// Load a `GridDefinition` from a JSON file and count its patterns (0–31 points).
     /// Length 0 (the empty/null pattern) is counted as a valid pattern unless `--min-length` excludes it.
     /// Pass `-` as the path to read from stdin, enabling pipelines like:
     ///   andlock grid "3x3" --export-json | andlock file -
@@ -146,6 +150,15 @@ fn bar_style() -> ProgressStyle {
         .progress_chars("━━╌")
 }
 
+/// Returns 20 % of the memory the OS reports as currently available.
+/// Falls back to 0 when the information cannot be obtained, which causes
+/// the router to always choose DFS — the safe default.
+fn available_memory_budget() -> u64 {
+    let mut sys = System::new();
+    sys.refresh_memory();
+    sys.available_memory() / 5
+}
+
 fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, quiet: bool) {
     let n = grid.points.len();
     let dim = grid.dimensions;
@@ -167,14 +180,20 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
         pb.finish_and_clear();
     }
 
-    // DP — total masks the outer loop will tick through: 2^n − 1
-    let num_masks: u64 = (1u64 << n).saturating_sub(1);
-    let dp_pb = if quiet {
+    let algorithm = choose_algorithm(n, available_memory_budget());
+
+    // DP ticks once per bitmask (2ⁿ − 1 total); DFS ticks once per starting node (n total).
+    let (total_ticks, algo_label): (u64, &str) = match algorithm {
+        Algorithm::Dp => ((1u64 << n).saturating_sub(1), "DP"),
+        Algorithm::Dfs => (n as u64, "DFS"),
+    };
+
+    let count_pb = if quiet {
         None
     } else {
-        let pb = ProgressBar::new(num_masks);
+        let pb = ProgressBar::new(total_ticks);
         pb.set_style(bar_style());
-        pb.set_message(format!("Counting patterns ({n} points)"));
+        pb.set_message(format!("Counting patterns ({n} points, {algo_label})"));
         pb.enable_steady_tick(Duration::from_millis(80));
         Some(pb)
     };
@@ -185,31 +204,50 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     // `lines` to size the final separator.
     let mut lines: Vec<String> = Vec::new();
     let t1 = Instant::now();
-    let counts = count_patterns_dp(n, &blocks, max_length, |event| match event {
-        DpEvent::Mask => {
-            if let Some(ref pb) = dp_pb {
+    let counts = match algorithm {
+        Algorithm::Dp => count_patterns_dp(n, &blocks, max_length, |event| match event {
+            DpEvent::Mask => {
+                if let Some(ref pb) = count_pb {
+                    pb.inc(1);
+                }
+            }
+            DpEvent::LengthDone { length, count } => {
+                if length >= min_length && length <= max_length && count > 0 {
+                    let line = format!("  Length {length:>2}: {count}");
+                    // `pb.println` prints above the bar without corrupting it on a
+                    // TTY, but is a no-op when the bar is hidden (e.g. stdout
+                    // piped). Fall back to plain `println!` in that case so the
+                    // per-length lines are never silently dropped.
+                    match count_pb.as_ref() {
+                        Some(pb) if !pb.is_hidden() => pb.println(&line),
+                        _ => println!("{line}"),
+                    }
+                    lines.push(line);
+                }
+            }
+        }),
+        Algorithm::Dfs => count_patterns_dfs(n, &blocks, max_length, || {
+            if let Some(ref pb) = count_pb {
                 pb.inc(1);
             }
-        }
-        DpEvent::LengthDone { length, count } => {
+        }),
+    };
+    let elapsed = t1.elapsed();
+
+    if let Some(pb) = count_pb {
+        pb.finish_and_clear();
+    }
+
+    // For DFS, streaming per-length output is not possible during computation,
+    // so results are printed in batch after the progress bar clears.
+    if algorithm == Algorithm::Dfs {
+        for (length, &count) in counts.iter().enumerate() {
             if length >= min_length && length <= max_length && count > 0 {
                 let line = format!("  Length {length:>2}: {count}");
-                // `pb.println` prints above the bar without corrupting it on a
-                // TTY, but is a no-op when the bar is hidden (e.g. stdout
-                // piped). Fall back to plain `println!` in that case so the
-                // per-length lines are never silently dropped.
-                match dp_pb.as_ref() {
-                    Some(pb) if !pb.is_hidden() => pb.println(&line),
-                    _ => println!("{line}"),
-                }
+                println!("{line}");
                 lines.push(line);
             }
         }
-    });
-    let elapsed = t1.elapsed();
-
-    if let Some(pb) = dp_pb {
-        pb.finish_and_clear();
     }
 
     let total: u128 = counts[min_length..=max_length].iter().sum();
