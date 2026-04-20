@@ -29,7 +29,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
-use andlock::dp::{DpEvent, count_patterns_dp};
+use andlock::counter::{DpEvent, count_patterns_dp};
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
 
 #[derive(Parser)]

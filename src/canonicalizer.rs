@@ -214,7 +214,7 @@ fn divide_exact(coord: i32, divisor: i64) -> i32 {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use crate::dp::count_patterns_dp;
+    use crate::counter::count_patterns_dp;
     use crate::grid::compute_blocks;
 
     fn grid(dimensions: usize, points: Vec<Vec<i32>>) -> GridDefinition {

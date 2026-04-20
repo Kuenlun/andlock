@@ -22,5 +22,5 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! modules so they can be reused and tested outside the CLI wrapper.
 
 pub mod canonicalizer;
-pub mod dp;
+pub mod counter;
 pub mod grid;
