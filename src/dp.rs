@@ -204,6 +204,134 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
     counts
 }
 
+/// Counts every valid pattern via depth-first search with `O(N)` memory.
+///
+/// This is the memory-light counterpart to [`count_patterns_dp`]. Instead of
+/// materialising a `2ⁿ × N` DP table, the search walks every valid prefix
+/// explicitly, keeping only the current visited bitmask and the recursion
+/// stack (depth bounded by `max_length ≤ N`).
+///
+/// Semantically the two counters are interchangeable: given the same inputs
+/// they must produce identical `Vec<u128>` outputs (the tests in this module
+/// enforce that equivalence). The tradeoff is runtime — without the DP's
+/// memoisation each valid pattern is re-expanded along its own path, so time
+/// scales with the number of valid prefixes rather than with `N² · 2ᴺ`. For
+/// small-to-moderate `N` the DP is faster; for large `N` (roughly `N ≥ 23`)
+/// the DP table no longer fits in memory and this DFS is the only option.
+///
+/// `blocks[i * n + j]` must hold the bitmask of nodes that must already be
+/// visited before the move `i → j` is legal (see [`crate::grid::compute_blocks`]).
+///
+/// `max_length` bounds the pattern lengths considered: once a prefix reaches
+/// `max_length` the search backtracks instead of extending.
+///
+/// Returns a `Vec<u128>` of length `max_length + 1` where `counts[k]` is the
+/// number of valid patterns of exactly `k` nodes. `counts[0] = 1` (the empty
+/// pattern).
+///
+/// `u128` is used for the same reason as in [`count_patterns_dp`]: for
+/// `n ≥ 21` the total count can exceed `u64::MAX`.
+///
+/// `on_start` is invoked once per starting node (so at most `n` times) and
+/// can be used to drive coarse progress reporting. It replaces the
+/// per-mask callback used by the DP because DFS has no natural outer loop
+/// over bitmasks.
+///
+/// # Memory
+/// `O(N + max_length)` — one `u128` per length slot plus a recursion stack
+/// whose depth never exceeds `max_length`. No exponential table is allocated.
+///
+/// # Complexity
+/// Proportional to the number of valid prefixes of length `≤ max_length`,
+/// i.e. `O(Σ_{k≤L} (valid patterns of length k))`. In the worst case (no
+/// blockers) this degenerates to `Σ_{k≤L} P(n, k)`, but that path is served
+/// by the closed-form fast path and never reaches the DFS.
+///
+/// # Panics
+/// Panics if `n > MAX_POINTS`, `blocks.len() != n * n`, or `max_length > n`.
+/// Like [`count_patterns_dp`], this function uses a `u32` bitmask for the
+/// visited set, which caps `n` at 32; `MAX_POINTS` is the tighter system
+/// ceiling shared by both counters.
+pub fn count_patterns_dfs(
+    n: usize,
+    blocks: &[u32],
+    max_length: usize,
+    on_start: impl Fn(),
+) -> Vec<u128> {
+    assert!(
+        n <= MAX_POINTS,
+        "N={n} exceeds the supported maximum of {MAX_POINTS}"
+    );
+    assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
+    assert!(
+        max_length <= n,
+        "max_length={max_length} must not exceed n={n}"
+    );
+
+    if blocks.iter().all(|&b| b == 0) {
+        return count_unconstrained(n, max_length);
+    }
+
+    let mut counts = vec![0u128; max_length + 1];
+    counts[0] = 1;
+    if n == 0 || max_length == 0 {
+        return counts;
+    }
+
+    counts[1] = n as u128;
+    if max_length == 1 {
+        return counts;
+    }
+
+    let full_mask: u32 = (1u32 << n) - 1;
+    let mut ctx = DfsCtx {
+        n,
+        blocks,
+        full_mask,
+        max_length,
+        counts: &mut counts,
+    };
+    for start in 0..n {
+        on_start();
+        ctx.extend(1u32 << start, start, 1);
+    }
+
+    counts
+}
+
+// State threaded through every recursive frame of the DFS.
+struct DfsCtx<'a> {
+    n: usize,
+    blocks: &'a [u32],
+    full_mask: u32,
+    max_length: usize,
+    counts: &'a mut [u128],
+}
+
+impl DfsCtx<'_> {
+    // Extends the current prefix `(mask, end)` of length `len` by every
+    // legal next node and accumulates the resulting pattern lengths. The
+    // caller guarantees `len < max_length`, so `counts[len + 1]` is always a
+    // valid slot.
+    fn extend(&mut self, mask: u32, end: usize, len: usize) {
+        let row = end * self.n;
+        let mut free = !mask & self.full_mask;
+        while free != 0 {
+            let next_bit = free & free.wrapping_neg();
+            free ^= next_bit;
+            let next = next_bit.trailing_zeros() as usize;
+
+            let blockers = self.blocks[row + next];
+            if mask & blockers == blockers {
+                self.counts[len + 1] += 1;
+                if len + 1 < self.max_length {
+                    self.extend(mask | next_bit, next, len + 1);
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -212,6 +340,19 @@ mod tests {
 
     fn grid(dimensions: usize, points: Vec<Vec<i32>>) -> GridDefinition {
         GridDefinition { dimensions, points }
+    }
+
+    // Runs both counters, asserts they agree, and returns the result.
+    // Every test that checks output values goes through this helper so that
+    // both algorithms are verified in a single pass.
+    fn count(n: usize, blocks: &[u32], max_length: usize) -> Vec<u128> {
+        let dp = count_patterns_dp(n, blocks, max_length, |_| {});
+        let dfs = count_patterns_dfs(n, blocks, max_length, || {});
+        assert_eq!(
+            dp, dfs,
+            "DP and DFS counts diverge for n={n}, max_length={max_length}"
+        );
+        dp
     }
 
     #[test]
@@ -228,7 +369,7 @@ mod tests {
         g.validate().unwrap();
         let blocks = compute_blocks(&g);
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, |_| {});
+        let counts = count(n, &blocks, n);
 
         assert_eq!(counts[0], 1);
         assert_eq!(counts[1], 9);
@@ -248,8 +389,7 @@ mod tests {
         let blocks = compute_blocks(&g);
         assert!(blocks.iter().all(|&b| b == 0));
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, |_| {});
-        assert_eq!(counts, vec![1, 4, 12, 24, 24]);
+        assert_eq!(count(n, &blocks, n), vec![1, 4, 12, 24, 24]);
     }
 
     #[test]
@@ -257,7 +397,7 @@ mod tests {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
         let blocks = compute_blocks(&g);
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, |_| {});
+        let counts = count(n, &blocks, n);
 
         assert_eq!(counts[1], 3);
         assert_eq!(counts[2], 4);
@@ -271,13 +411,13 @@ mod tests {
         empty.validate().unwrap();
         let blocks = compute_blocks(&empty);
         assert!(blocks.is_empty());
-        assert_eq!(count_patterns_dp(0, &blocks, 0, |_| {}), vec![1]);
+        assert_eq!(count(0, &blocks, 0), vec![1]);
 
         let single = grid(2, vec![vec![7, 7]]);
         single.validate().unwrap();
         let blocks = compute_blocks(&single);
         assert_eq!(blocks, vec![0]);
-        assert_eq!(count_patterns_dp(1, &blocks, 1, |_| {}), vec![1, 1]);
+        assert_eq!(count(1, &blocks, 1), vec![1, 1]);
     }
 
     #[test]
@@ -285,7 +425,7 @@ mod tests {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, |_| {});
+        let counts = count(n, &blocks, n);
         assert_eq!(counts[4..=9].iter().sum::<u128>(), 389_112);
     }
 
@@ -294,9 +434,9 @@ mod tests {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
         let n = g.points.len();
-        let full = count_patterns_dp(n, &blocks, n, |_| {});
+        let full = count(n, &blocks, n);
         for cap in 0..=n {
-            let capped = count_patterns_dp(n, &blocks, cap, |_| {});
+            let capped = count(n, &blocks, cap);
             assert_eq!(capped.len(), cap + 1, "unexpected length for cap={cap}");
             assert_eq!(
                 capped.as_slice(),
@@ -362,24 +502,21 @@ mod tests {
     fn max_length_zero_on_nonempty_grid_returns_only_empty_pattern() {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
-        let counts = count_patterns_dp(g.points.len(), &blocks, 0, |_| {});
-        assert_eq!(counts, vec![1]);
+        assert_eq!(count(g.points.len(), &blocks, 0), vec![1]);
     }
 
     #[test]
     fn max_length_one_reports_only_singletons() {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
-        let counts = count_patterns_dp(g.points.len(), &blocks, 1, |_| {});
-        assert_eq!(counts, vec![1, 9]);
+        assert_eq!(count(g.points.len(), &blocks, 1), vec![1, 9]);
     }
 
     #[test]
     fn max_length_four_matches_android_minimum_run() {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
-        let counts = count_patterns_dp(g.points.len(), &blocks, 4, |_| {});
-        assert_eq!(counts[4], 1_624);
+        assert_eq!(count(g.points.len(), &blocks, 4)[4], 1_624);
     }
 
     // Verify the closed-form formula P(n,k) = n!/(n-k)! is mathematically
@@ -388,7 +525,7 @@ mod tests {
     fn unconstrained_formula_is_falling_factorial() {
         for n in 0..=7usize {
             let zero_blocks = vec![0u32; n * n];
-            let counts = count_patterns_dp(n, &zero_blocks, n, |_| {});
+            let counts = count(n, &zero_blocks, n);
             assert_eq!(counts.len(), n + 1);
 
             let mut expected = vec![0u128; n + 1];
@@ -413,9 +550,8 @@ mod tests {
             "expected zero block matrix for a square grid"
         );
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, |_| {});
         // P(4, k) for k=0..4: [1, 4, 12, 24, 24]
-        assert_eq!(counts, vec![1, 4, 12, 24, 24]);
+        assert_eq!(count(n, &blocks, n), vec![1, 4, 12, 24, 24]);
     }
 
     // For a grid with collinear points the fast path must NOT fire; the DP
@@ -430,10 +566,34 @@ mod tests {
             "expected non-zero block matrix for collinear points"
         );
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, |_| {});
+        let counts = count(n, &blocks, n);
         // Constrained: only 4 valid length-3 patterns, not 3! = 6.
         assert_eq!(counts[3], 4);
         // Unconstrained formula would give P(3,3) = 6.
         assert_ne!(counts[3], 6);
+    }
+
+    // on_start must fire exactly n times (once per starting node) when the
+    // constrained search path runs, and zero times when the unconstrained
+    // fast path short-circuits the computation.
+    #[test]
+    fn dfs_on_start_fires_once_per_starting_node_when_constrained() {
+        let g = build_grid_definition(&[3, 3], 0);
+        let blocks = compute_blocks(&g);
+        let n = g.points.len();
+        let ticks = std::cell::Cell::new(0usize);
+        count_patterns_dfs(n, &blocks, n, || ticks.set(ticks.get() + 1));
+        assert_eq!(ticks.get(), n);
+    }
+
+    #[test]
+    fn dfs_on_start_does_not_fire_on_unconstrained_fast_path() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
+        let blocks = compute_blocks(&g);
+        assert!(blocks.iter().all(|&b| b == 0));
+        let n = g.points.len();
+        let ticks = std::cell::Cell::new(0usize);
+        count_patterns_dfs(n, &blocks, n, || ticks.set(ticks.get() + 1));
+        assert_eq!(ticks.get(), 0);
     }
 }
