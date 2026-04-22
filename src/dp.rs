@@ -18,6 +18,29 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use crate::grid::MAX_POINTS;
 
+/// Progress event emitted by [`count_patterns_dp`] during execution.
+///
+/// A streaming caller uses `Mask` to advance a per-mask progress bar and
+/// `LengthDone` to print the count of patterns of a given length as soon as it
+/// is fully known — before the whole DP finishes.
+pub enum DpEvent {
+    /// One outer-loop mask has been processed (fired `2ⁿ − 1` times during the
+    /// constrained DP; not fired at all on the unconstrained fast path).
+    Mask,
+    /// `counts[length]` has received its last contribution and is now final.
+    LengthDone { length: usize, count: u128 },
+}
+
+/// Next bitmask with the same popcount as `x` (Gosper's hack).
+///
+/// Used to enumerate masks in popcount-ascending order so that each popcount
+/// layer can emit a [`DpEvent::LengthDone`] as soon as it completes.
+const fn gosper_next(x: u32) -> u32 {
+    let c = x & x.wrapping_neg();
+    let r = x.wrapping_add(c);
+    (((r ^ x) >> 2) / c) | r
+}
+
 /// Computes pattern counts when there are no visibility constraints.
 ///
 /// When every `blocks[i * n + j] == 0` every move is unconditionally legal, so
@@ -58,11 +81,11 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 ///
 /// # Panics
 /// Panics if `n > MAX_POINTS`, `blocks.len() != n * n`, or `max_length > n`.
-pub fn count_patterns_dp(
+pub fn count_patterns_dp<F: FnMut(DpEvent)>(
     n: usize,
     blocks: &[u32],
     max_length: usize,
-    on_mask: impl Fn(),
+    mut on_event: F,
 ) -> Vec<u128> {
     assert!(
         n <= MAX_POINTS,
@@ -75,11 +98,22 @@ pub fn count_patterns_dp(
     );
 
     if blocks.iter().all(|&b| b == 0) {
-        return count_unconstrained(n, max_length);
+        let counts = count_unconstrained(n, max_length);
+        for (k, &c) in counts.iter().enumerate() {
+            on_event(DpEvent::LengthDone {
+                length: k,
+                count: c,
+            });
+        }
+        return counts;
     }
 
     let mut counts = vec![0u128; max_length + 1];
     counts[0] = 1;
+    on_event(DpEvent::LengthDone {
+        length: 0,
+        count: 1,
+    });
     if n == 0 || max_length == 0 {
         return counts;
     }
@@ -99,47 +133,71 @@ pub fn count_patterns_dp(
         dp[(1usize << v) * n + v] = 1;
     }
     counts[1] = n as u128;
+    on_event(DpEvent::LengthDone {
+        length: 1,
+        count: counts[1],
+    });
 
-    // Enumerate masks in ascending order so all proper-subset states are
-    // already populated by the time we reach `mask`. Masks whose length
-    // already equals `max_length` cannot be extended into a counted pattern,
-    // so their inner loops are skipped entirely.
-    for mask in 1u32..=full_mask {
-        on_mask();
-        let len = mask.count_ones() as usize;
-        if len >= max_length {
-            continue;
-        }
-        let base = (mask as usize) * n;
+    // Enumerate masks grouped by popcount (ascending). Every proper subset of
+    // a popcount-p mask has popcount < p, so subset states are still
+    // guaranteed to be populated before use. Grouping by popcount lets us
+    // report `counts[p+1]` the moment the last popcount-p mask is processed,
+    // enabling streaming output without waiting for the full run.
+    //
+    // Masks whose length already equals `max_length` cannot be extended into
+    // a counted pattern, so their inner loops are skipped — but they are
+    // still ticked so the caller's mask-granular progress bar reaches 100%.
+    for p in 1..=n {
+        let mut mask: u32 = (1u32 << p) - 1;
+        let last: u32 = mask << (n - p);
+        loop {
+            on_event(DpEvent::Mask);
+            if p < max_length {
+                let base = (mask as usize) * n;
 
-        let mut visited = mask;
-        while visited != 0 {
-            let end_bit = visited & visited.wrapping_neg();
-            visited ^= end_bit;
-            let end = end_bit.trailing_zeros() as usize;
+                let mut visited = mask;
+                while visited != 0 {
+                    let end_bit = visited & visited.wrapping_neg();
+                    visited ^= end_bit;
+                    let end = end_bit.trailing_zeros() as usize;
 
-            let ways = dp[base + end];
-            if ways == 0 {
-                continue;
-            }
+                    let ways = dp[base + end];
+                    if ways == 0 {
+                        continue;
+                    }
 
-            let mut free = !mask & full_mask;
-            while free != 0 {
-                let next_bit = free & free.wrapping_neg();
-                free ^= next_bit;
-                let next = next_bit.trailing_zeros() as usize;
+                    let mut free = !mask & full_mask;
+                    while free != 0 {
+                        let next_bit = free & free.wrapping_neg();
+                        free ^= next_bit;
+                        let next = next_bit.trailing_zeros() as usize;
 
-                let blockers = blocks[end * n + next];
-                if mask & blockers == blockers {
-                    counts[len + 1] += ways;
-                    // Writes into the terminal layer would never be read,
-                    // since masks of length `max_length` are skipped above.
-                    if len + 1 < max_length {
-                        let new_mask = (mask | next_bit) as usize;
-                        dp[new_mask * n + next] += ways;
+                        let blockers = blocks[end * n + next];
+                        if mask & blockers == blockers {
+                            counts[p + 1] += ways;
+                            // Writes into the terminal layer would never be
+                            // read, since masks of length `max_length` are
+                            // skipped by the outer `p < max_length` guard.
+                            if p + 1 < max_length {
+                                let new_mask = (mask | next_bit) as usize;
+                                dp[new_mask * n + next] += ways;
+                            }
+                        }
                     }
                 }
             }
+            if mask == last {
+                break;
+            }
+            mask = gosper_next(mask);
+        }
+        // All contributions to counts[p+1] came from popcount-p masks, so the
+        // value is now final.
+        if p < max_length {
+            on_event(DpEvent::LengthDone {
+                length: p + 1,
+                count: counts[p + 1],
+            });
         }
     }
 
@@ -170,7 +228,7 @@ mod tests {
         g.validate().unwrap();
         let blocks = compute_blocks(&g);
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, || {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {});
 
         assert_eq!(counts[0], 1);
         assert_eq!(counts[1], 9);
@@ -190,7 +248,7 @@ mod tests {
         let blocks = compute_blocks(&g);
         assert!(blocks.iter().all(|&b| b == 0));
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, || {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {});
         assert_eq!(counts, vec![1, 4, 12, 24, 24]);
     }
 
@@ -199,7 +257,7 @@ mod tests {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
         let blocks = compute_blocks(&g);
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, || {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {});
 
         assert_eq!(counts[1], 3);
         assert_eq!(counts[2], 4);
@@ -213,13 +271,13 @@ mod tests {
         empty.validate().unwrap();
         let blocks = compute_blocks(&empty);
         assert!(blocks.is_empty());
-        assert_eq!(count_patterns_dp(0, &blocks, 0, || {}), vec![1]);
+        assert_eq!(count_patterns_dp(0, &blocks, 0, |_| {}), vec![1]);
 
         let single = grid(2, vec![vec![7, 7]]);
         single.validate().unwrap();
         let blocks = compute_blocks(&single);
         assert_eq!(blocks, vec![0]);
-        assert_eq!(count_patterns_dp(1, &blocks, 1, || {}), vec![1, 1]);
+        assert_eq!(count_patterns_dp(1, &blocks, 1, |_| {}), vec![1, 1]);
     }
 
     #[test]
@@ -227,7 +285,7 @@ mod tests {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, || {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {});
         assert_eq!(counts[4..=9].iter().sum::<u128>(), 389_112);
     }
 
@@ -236,9 +294,9 @@ mod tests {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
         let n = g.points.len();
-        let full = count_patterns_dp(n, &blocks, n, || {});
+        let full = count_patterns_dp(n, &blocks, n, |_| {});
         for cap in 0..=n {
-            let capped = count_patterns_dp(n, &blocks, cap, || {});
+            let capped = count_patterns_dp(n, &blocks, cap, |_| {});
             assert_eq!(capped.len(), cap + 1, "unexpected length for cap={cap}");
             assert_eq!(
                 capped.as_slice(),
@@ -259,7 +317,7 @@ mod tests {
         let blocks = compute_blocks(&g);
         let n = g.points.len();
         assert_eq!(n, 21);
-        let counts = count_patterns_dp(n, &blocks, n, || {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {});
         // In a zero-blocker graph, counts[n] = n!; free points guarantee many
         // paths exceed u64::MAX, so u128 is necessary.
         assert!(
@@ -284,7 +342,7 @@ mod tests {
         let blocks = compute_blocks(&g);
         let n = g.points.len();
         assert_eq!(n, 24);
-        let counts = count_patterns_dp(n, &blocks, n, || {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {});
         for k in 1..=n {
             assert!(
                 counts[k] >= counts[k - 1],
@@ -304,7 +362,7 @@ mod tests {
     fn max_length_zero_on_nonempty_grid_returns_only_empty_pattern() {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
-        let counts = count_patterns_dp(g.points.len(), &blocks, 0, || {});
+        let counts = count_patterns_dp(g.points.len(), &blocks, 0, |_| {});
         assert_eq!(counts, vec![1]);
     }
 
@@ -312,7 +370,7 @@ mod tests {
     fn max_length_one_reports_only_singletons() {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
-        let counts = count_patterns_dp(g.points.len(), &blocks, 1, || {});
+        let counts = count_patterns_dp(g.points.len(), &blocks, 1, |_| {});
         assert_eq!(counts, vec![1, 9]);
     }
 
@@ -320,7 +378,7 @@ mod tests {
     fn max_length_four_matches_android_minimum_run() {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
-        let counts = count_patterns_dp(g.points.len(), &blocks, 4, || {});
+        let counts = count_patterns_dp(g.points.len(), &blocks, 4, |_| {});
         assert_eq!(counts[4], 1_624);
     }
 
@@ -330,7 +388,7 @@ mod tests {
     fn unconstrained_formula_is_falling_factorial() {
         for n in 0..=7usize {
             let zero_blocks = vec![0u32; n * n];
-            let counts = count_patterns_dp(n, &zero_blocks, n, || {});
+            let counts = count_patterns_dp(n, &zero_blocks, n, |_| {});
             assert_eq!(counts.len(), n + 1);
 
             let mut expected = vec![0u128; n + 1];
@@ -355,7 +413,7 @@ mod tests {
             "expected zero block matrix for a square grid"
         );
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, || {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {});
         // P(4, k) for k=0..4: [1, 4, 12, 24, 24]
         assert_eq!(counts, vec![1, 4, 12, 24, 24]);
     }
@@ -372,7 +430,7 @@ mod tests {
             "expected non-zero block matrix for collinear points"
         );
         let n = g.points.len();
-        let counts = count_patterns_dp(n, &blocks, n, || {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {});
         // Constrained: only 4 valid length-3 patterns, not 3! = 6.
         assert_eq!(counts[3], 4);
         // Unconstrained formula would give P(3,3) = 6.
