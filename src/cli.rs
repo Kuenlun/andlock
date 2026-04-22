@@ -32,7 +32,8 @@ use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
 use andlock::counter::{
-    Algorithm, DpEvent, choose_algorithm, count_patterns_dfs, count_patterns_dp,
+    Algorithm, DfsEvent, DpEvent, choose_algorithm, count_patterns_dfs, count_patterns_dp,
+    dfs_progress_ticks,
 };
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
 
@@ -182,18 +183,22 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
 
     let algorithm = choose_algorithm(n, available_memory_budget());
 
-    // DP ticks once per bitmask (2ⁿ − 1 total); DFS ticks once per starting node (n total).
+    // DP ticks once per bitmask (2ⁿ − 1 total); DFS ticks once per
+    // top-level (start, second) pair (n · (n − 1) total). DFS used to tick
+    // only once per starting node, which left the bar stuck around 1/n for
+    // the entire first (dominant) subtree on large instances.
     let (total_ticks, algo_label): (u64, &str) = match algorithm {
         Algorithm::Dp => ((1u64 << n).saturating_sub(1), "DP"),
-        Algorithm::Dfs => (n as u64, "DFS"),
+        Algorithm::Dfs => (dfs_progress_ticks(n), "DFS"),
     };
+    let base_msg = format!("Counting patterns ({n} points, {algo_label})");
 
     let count_pb = if quiet {
         None
     } else {
         let pb = ProgressBar::new(total_ticks);
         pb.set_style(bar_style());
-        pb.set_message(format!("Counting patterns ({n} points, {algo_label})"));
+        pb.set_message(base_msg.clone());
         pb.enable_steady_tick(Duration::from_millis(80));
         Some(pb)
     };
@@ -203,6 +208,20 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     // instead of getting a single batch at the end. We still keep them in
     // `lines` to size the final separator.
     let mut lines: Vec<String> = Vec::new();
+    let mut emit_length = |length: usize, count: u128, pb: Option<&ProgressBar>| {
+        if length >= min_length && length <= max_length && count > 0 {
+            let line = format!("  Length {length:>2}: {count}");
+            // `pb.println` prints above the bar without corrupting it on a
+            // TTY, but is a no-op when the bar is hidden (e.g. stdout
+            // piped). Fall back to plain `println!` in that case so the
+            // per-length lines are never silently dropped.
+            match pb {
+                Some(pb) if !pb.is_hidden() => pb.println(&line),
+                _ => println!("{line}"),
+            }
+            lines.push(line);
+        }
+    };
     let t1 = Instant::now();
     let counts = match algorithm {
         Algorithm::Dp => count_patterns_dp(n, &blocks, max_length, |event| match event {
@@ -212,23 +231,25 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
                 }
             }
             DpEvent::LengthDone { length, count } => {
-                if length >= min_length && length <= max_length && count > 0 {
-                    let line = format!("  Length {length:>2}: {count}");
-                    // `pb.println` prints above the bar without corrupting it on a
-                    // TTY, but is a no-op when the bar is hidden (e.g. stdout
-                    // piped). Fall back to plain `println!` in that case so the
-                    // per-length lines are never silently dropped.
-                    match count_pb.as_ref() {
-                        Some(pb) if !pb.is_hidden() => pb.println(&line),
-                        _ => println!("{line}"),
-                    }
-                    lines.push(line);
-                }
+                emit_length(length, count, count_pb.as_ref());
             }
         }),
-        Algorithm::Dfs => count_patterns_dfs(n, &blocks, max_length, || {
-            if let Some(ref pb) = count_pb {
-                pb.inc(1);
+        // DFS cannot finalize per-length counts mid-run, but it can expose
+        // the running tally on every Progress tick. We update the bar's
+        // message with the current total so the user has a live signal that
+        // computation is making progress; the per-length lines are still
+        // printed via the same `emit_length` path once the final
+        // LengthDone events fire.
+        Algorithm::Dfs => count_patterns_dfs(n, &blocks, max_length, |event| match event {
+            DfsEvent::Progress { counts } => {
+                if let Some(ref pb) = count_pb {
+                    pb.inc(1);
+                    let running: u128 = counts[min_length..=max_length].iter().sum();
+                    pb.set_message(format!("{base_msg} · {running} so far"));
+                }
+            }
+            DfsEvent::LengthDone { length, count } => {
+                emit_length(length, count, count_pb.as_ref());
             }
         }),
     };
@@ -236,18 +257,6 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
 
     if let Some(pb) = count_pb {
         pb.finish_and_clear();
-    }
-
-    // For DFS, streaming per-length output is not possible during computation,
-    // so results are printed in batch after the progress bar clears.
-    if algorithm == Algorithm::Dfs {
-        for (length, &count) in counts.iter().enumerate() {
-            if length >= min_length && length <= max_length && count > 0 {
-                let line = format!("  Length {length:>2}: {count}");
-                println!("{line}");
-                lines.push(line);
-            }
-        }
     }
 
     let total: u128 = counts[min_length..=max_length].iter().sum();
