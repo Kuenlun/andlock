@@ -29,7 +29,7 @@ use clap::{Args, Parser, Subcommand};
 use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
-use andlock::dp::count_patterns_dp;
+use andlock::dp::{DpEvent, count_patterns_dp};
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
 
 #[derive(Parser)]
@@ -179,10 +179,31 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
         Some(pb)
     };
 
+    // Per-length lines are printed the moment they are finalized (above the
+    // progress bar via `pb.println`), so the user sees results accumulate live
+    // instead of getting a single batch at the end. We still keep them in
+    // `lines` to size the final separator.
+    let mut lines: Vec<String> = Vec::new();
     let t1 = Instant::now();
-    let counts = count_patterns_dp(n, &blocks, max_length, || {
-        if let Some(ref pb) = dp_pb {
-            pb.inc(1);
+    let counts = count_patterns_dp(n, &blocks, max_length, |event| match event {
+        DpEvent::Mask => {
+            if let Some(ref pb) = dp_pb {
+                pb.inc(1);
+            }
+        }
+        DpEvent::LengthDone { length, count } => {
+            if length >= min_length && length <= max_length && count > 0 {
+                let line = format!("  Length {length:>2}: {count}");
+                // `pb.println` prints above the bar without corrupting it on a
+                // TTY, but is a no-op when the bar is hidden (e.g. stdout
+                // piped). Fall back to plain `println!` in that case so the
+                // per-length lines are never silently dropped.
+                match dp_pb.as_ref() {
+                    Some(pb) if !pb.is_hidden() => pb.println(&line),
+                    _ => println!("{line}"),
+                }
+                lines.push(line);
+            }
         }
     });
     let elapsed = t1.elapsed();
@@ -192,12 +213,6 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     }
 
     let total: u128 = counts[min_length..=max_length].iter().sum();
-    let mut lines: Vec<String> = Vec::new();
-    for (k, c) in counts.iter().enumerate().skip(min_length) {
-        if *c > 0 {
-            lines.push(format!("  Length {k:>2}: {c}"));
-        }
-    }
     let total_line = format!("  Total: {total}");
     let sep_width = lines
         .iter()
@@ -205,9 +220,6 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
         .map(|l| l.chars().count())
         .max()
         .unwrap_or(27);
-    for line in &lines {
-        println!("{line}");
-    }
     println!("{}", "─".repeat(sep_width));
     println!("{total_line}");
     if !quiet {
