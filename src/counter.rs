@@ -34,28 +34,33 @@ pub enum DpEvent {
 /// Progress / streaming event emitted by [`count_patterns_dfs`] during
 /// execution.
 ///
-/// Unlike [`DpEvent`], per-length counts cannot be finalized mid-run: every
-/// `counts[k]` keeps accumulating contributions from new starting subtrees
-/// until the very last one completes. `Progress` therefore exposes the
-/// *running* tally so callers can render live partial totals, and
-/// `LengthDone` is emitted once per length at the very end (mirroring the DP
-/// event so both counters share the same output plumbing).
-pub enum DfsEvent<'a> {
-    /// A top-level `(start, second)` pair has been fully explored. Fires
-    /// exactly `n * (n − 1)` times during the constrained search; not fired
-    /// at all on the unconstrained fast path. `counts` is the current partial
-    /// tally — valid only for the duration of the callback.
-    Progress { counts: &'a [u128] },
-    /// Final count for `length`, emitted once per entry of the returned
-    /// vector after all DFS work is done.
+/// IDDFS runs one pass per target length. Each pass counts patterns of exactly
+/// that length independently, so [`DfsEvent::LengthDone`] carries a *final*
+/// value the moment it fires — the caller can print it immediately and it will
+/// never change.
+pub enum DfsEvent {
+    /// Beginning of the pass that counts patterns of exactly `target` nodes.
+    /// Fires once per target length `≥ 2`. Not fired on the unconstrained
+    /// fast path. `pair_total` is the number of top-level `(start, second)`
+    /// pairs that will tick in this pass — use it to size a per-pass bar.
+    PassStart { target: usize, pair_total: u64 },
+    /// One top-level `(start, second)` pair for the current pass has been
+    /// fully explored. Fires `pair_total` times per pass; not fired on the
+    /// unconstrained fast path.
+    PassTick { target: usize, pair_index: u64 },
+    /// `counts[length]` is now final. Fires for every entry of the returned
+    /// vector in strictly ascending order: lengths 0 and 1 fire before any
+    /// `PassStart`; length `k ≥ 2` fires immediately after its pass
+    /// completes.
     LengthDone { length: usize, count: u128 },
 }
 
-/// Number of [`DfsEvent::Progress`] ticks [`count_patterns_dfs`] fires during
-/// a constrained run — `n · (n − 1)`, clamped against overflow. Callers use
-/// it to size a progress bar.
+/// Number of [`DfsEvent::PassTick`] events fired during one IDDFS pass.
+///
+/// Equal to `n · (n − 1)`, clamped against overflow. The same count repeats
+/// for every pass target; callers use it to size a per-pass progress bar.
 #[must_use]
-pub const fn dfs_progress_ticks(n: usize) -> u64 {
+pub const fn dfs_pass_ticks(n: usize) -> u64 {
     let n = n as u64;
     n.saturating_mul(n.saturating_sub(1))
 }
@@ -116,7 +121,7 @@ pub fn count_patterns(
             }
         }),
         Algorithm::Dfs => count_patterns_dfs(n, blocks, max_length, |event| {
-            if matches!(event, DfsEvent::Progress { .. }) {
+            if matches!(event, DfsEvent::PassTick { .. }) {
                 on_tick();
             }
         }),
@@ -293,66 +298,33 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
     counts
 }
 
-/// Counts every valid pattern via depth-first search with `O(N)` memory.
+/// Counts every valid pattern via Iterative Deepening DFS with `O(N)` memory.
 ///
-/// This is the memory-light counterpart to [`count_patterns_dp`]. Instead of
-/// materialising a `2ⁿ × N` DP table, the search walks every valid prefix
-/// explicitly, keeping only the current visited bitmask and the recursion
-/// stack (depth bounded by `max_length ≤ N`).
-///
-/// Semantically the two counters are interchangeable: given the same inputs
-/// they must produce identical `Vec<u128>` outputs (the tests in this module
-/// enforce that equivalence). The tradeoff is runtime — without the DP's
-/// memoisation each valid pattern is re-expanded along its own path, so time
-/// scales with the number of valid prefixes rather than with `N² · 2ᴺ`. For
-/// small-to-moderate `N` the DP is faster; for large `N` (roughly `N ≥ 23`)
-/// the DP table no longer fits in memory and this DFS is the only option.
+/// Runs one pass per target length `L = 2, 3, …, max_length`. Each pass
+/// counts *only* patterns of exactly `L` nodes, so `counts[L]` is final as
+/// soon as that pass ends — emitted immediately via
+/// [`DfsEvent::LengthDone`] — before the next pass begins. The caller can
+/// kill the process after any number of passes and retain exact counts for
+/// every completed length.
 ///
 /// `blocks[i * n + j]` must hold the bitmask of nodes that must already be
 /// visited before the move `i → j` is legal (see [`crate::grid::compute_blocks`]).
 ///
-/// `max_length` bounds the pattern lengths considered: once a prefix reaches
-/// `max_length` the search backtracks instead of extending.
+/// `max_length` bounds the target lengths: passes run for
+/// `target ∈ 2..=max_length`.
 ///
 /// Returns a `Vec<u128>` of length `max_length + 1` where `counts[k]` is the
-/// number of valid patterns of exactly `k` nodes. `counts[0] = 1` (the empty
-/// pattern).
+/// number of valid patterns of exactly `k` nodes. `counts[0] = 1`.
 ///
-/// `u128` is used for the same reason as in [`count_patterns_dp`]: for
-/// `n ≥ 21` the total count can exceed `u64::MAX`.
-///
-/// `on_event` is invoked with [`DfsEvent::Progress`] once per top-level
-/// `(start, second)` pair — `n · (n − 1)` times during the constrained
-/// search, zero times on the unconstrained fast path — and with
-/// [`DfsEvent::LengthDone`] once per length at the very end. The
-/// fine-grained progress granularity is deliberate: ticking only once per
-/// starting node (as an earlier version did) left the progress bar stuck
-/// near `1/n` for most of the run, because the first start's subtree
-/// dominates the wall-clock cost.
-///
-/// Per-length results cannot stream mid-computation the way [`DpEvent`]
-/// does: every `counts[k]` keeps accumulating until the final starting
-/// subtree completes. `Progress` exposes the running tally so callers can
-/// still render a live partial total, and all [`DfsEvent::LengthDone`]
-/// events fire together at the end — matching DP's event shape so output
-/// plumbing can be shared.
+/// `u128` is used because for `n ≥ 21` the total count exceeds `u64::MAX`.
 ///
 /// # Memory
-/// `O(N + max_length)` — one `u128` per length slot plus a recursion stack
-/// whose depth never exceeds `max_length`. No exponential table is allocated.
-///
-/// # Complexity
-/// Proportional to the number of valid prefixes of length `≤ max_length`,
-/// i.e. `O(Σ_{k≤L} (valid patterns of length k))`. In the worst case (no
-/// blockers) this degenerates to `Σ_{k≤L} P(n, k)`, but that path is served
-/// by the closed-form fast path and never reaches the DFS.
+/// `O(max_length)` — one `u128` per length slot plus a recursion stack whose
+/// depth never exceeds `max_length`. No exponential table is allocated.
 ///
 /// # Panics
 /// Panics if `n > MAX_POINTS`, `blocks.len() != n * n`, or `max_length > n`.
-/// Like [`count_patterns_dp`], this function uses a `u32` bitmask for the
-/// visited set, which caps `n` at 32; `MAX_POINTS` is the tighter system
-/// ceiling shared by both counters.
-pub fn count_patterns_dfs<F: FnMut(DfsEvent<'_>)>(
+pub fn count_patterns_dfs<F: FnMut(DfsEvent)>(
     n: usize,
     blocks: &[u32],
     max_length: usize,
@@ -381,85 +353,105 @@ pub fn count_patterns_dfs<F: FnMut(DfsEvent<'_>)>(
 
     let mut counts = vec![0u128; max_length + 1];
     counts[0] = 1;
-    if n != 0 && max_length >= 1 {
-        counts[1] = n as u128;
+    on_event(DfsEvent::LengthDone {
+        length: 0,
+        count: 1,
+    });
+    if n == 0 || max_length == 0 {
+        return counts;
+    }
+    counts[1] = n as u128;
+    on_event(DfsEvent::LengthDone {
+        length: 1,
+        count: n as u128,
+    });
+    if max_length < 2 {
+        return counts;
     }
 
-    if n >= 1 && max_length >= 2 {
-        let full_mask: u32 = (1u32 << n) - 1;
-        let mut ctx = DfsCtx {
-            n,
-            blocks,
-            full_mask,
-            max_length,
-            counts: &mut counts,
-        };
-        // Top-level loop is split into (start, second) so that progress
-        // ticks fire `n · (n − 1)` times instead of `n`. The extra
-        // granularity is what lets the CLI progress bar advance visibly on
-        // large instances where each starting subtree takes hours or more.
+    let full_mask: u32 = (1u32 << n) - 1;
+    let pair_total = dfs_pass_ticks(n);
+
+    for (i, count_slot) in counts[2..].iter_mut().enumerate() {
+        let target = i + 2;
+        on_event(DfsEvent::PassStart { target, pair_total });
+        let mut count_target = 0u128;
+        let mut pair_index: u64 = 0;
         for start in 0..n {
-            let mask = 1u32 << start;
+            let start_bit = 1u32 << start;
             let row = start * n;
             for second in 0..n {
                 if second == start {
                     continue;
                 }
-                let next_bit = 1u32 << second;
-                let blockers = ctx.blocks[row + second];
-                if mask & blockers == blockers {
-                    ctx.counts[2] += 1;
-                    if 2 < ctx.max_length {
-                        ctx.extend(mask | next_bit, second, 2);
+                let second_bit = 1u32 << second;
+                let blockers = blocks[row + second];
+                if start_bit & blockers == blockers {
+                    if target == 2 {
+                        count_target += 1;
+                    } else {
+                        count_target += iddfs_count(
+                            start_bit | second_bit,
+                            second,
+                            2,
+                            target,
+                            blocks,
+                            n,
+                            full_mask,
+                        );
                     }
                 }
-                on_event(DfsEvent::Progress {
-                    counts: &*ctx.counts,
-                });
+                pair_index += 1;
+                on_event(DfsEvent::PassTick { target, pair_index });
             }
         }
-    }
-
-    for (k, &c) in counts.iter().enumerate() {
+        *count_slot = count_target;
         on_event(DfsEvent::LengthDone {
-            length: k,
-            count: c,
+            length: target,
+            count: count_target,
         });
     }
+
     counts
 }
 
-// State threaded through every recursive frame of the DFS.
-struct DfsCtx<'a> {
+/// Counts patterns of exactly `target` nodes that extend the prefix
+/// `(mask, end)` currently at depth `depth`. The recursion short-circuits at
+/// `depth + 1 == target` to avoid any work beyond the target layer.
+fn iddfs_count(
+    mask: u32,
+    end: usize,
+    depth: usize,
+    target: usize,
+    blocks: &[u32],
     n: usize,
-    blocks: &'a [u32],
     full_mask: u32,
-    max_length: usize,
-    counts: &'a mut [u128],
-}
-
-impl DfsCtx<'_> {
-    // Extends the current prefix `(mask, end)` of length `len` by every
-    // legal next node and accumulates the resulting pattern lengths. The
-    // caller guarantees `len < max_length`, so `counts[len + 1]` is always a
-    // valid slot.
-    fn extend(&mut self, mask: u32, end: usize, len: usize) {
-        let row = end * self.n;
-        let mut free = !mask & self.full_mask;
-        while free != 0 {
-            let next_bit = free & free.wrapping_neg();
-            free ^= next_bit;
-            let next = next_bit.trailing_zeros() as usize;
-
-            let blockers = self.blocks[row + next];
-            if mask & blockers == blockers {
-                self.counts[len + 1] += 1;
-                if len + 1 < self.max_length {
-                    self.extend(mask | next_bit, next, len + 1);
-                }
+) -> u128 {
+    let mut total = 0u128;
+    let row = end * n;
+    let mut free = !mask & full_mask;
+    while free != 0 {
+        let next_bit = free & free.wrapping_neg();
+        free ^= next_bit;
+        let next = next_bit.trailing_zeros() as usize;
+        let blockers = blocks[row + next];
+        if mask & blockers == blockers {
+            if depth + 1 == target {
+                total += 1;
+            } else {
+                total += iddfs_count(
+                    mask | next_bit,
+                    next,
+                    depth + 1,
+                    target,
+                    blocks,
+                    n,
+                    full_mask,
+                );
             }
         }
     }
+    total
 }
 
 #[cfg(test)]
@@ -703,42 +695,8 @@ mod tests {
         assert_ne!(counts[3], 6);
     }
 
-    // DfsEvent::Progress must fire n · (n-1) times during a constrained run
-    // (one tick per top-level (start, second) pair), and zero times when the
-    // unconstrained fast path short-circuits the computation.
-    #[test]
-    fn dfs_progress_fires_once_per_start_second_pair_when_constrained() {
-        let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
-        let n = g.points.len();
-        let ticks = std::cell::Cell::new(0usize);
-        count_patterns_dfs(n, &blocks, n, |event| {
-            if matches!(event, DfsEvent::Progress { .. }) {
-                ticks.set(ticks.get() + 1);
-            }
-        });
-        assert_eq!(ticks.get(), n * (n - 1));
-        assert_eq!(ticks.get() as u64, dfs_progress_ticks(n));
-    }
-
-    #[test]
-    fn dfs_progress_does_not_fire_on_unconstrained_fast_path() {
-        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
-        let blocks = compute_blocks(&g);
-        assert!(blocks.iter().all(|&b| b == 0));
-        let n = g.points.len();
-        let ticks = std::cell::Cell::new(0usize);
-        count_patterns_dfs(n, &blocks, n, |event| {
-            if matches!(event, DfsEvent::Progress { .. }) {
-                ticks.set(ticks.get() + 1);
-            }
-        });
-        assert_eq!(ticks.get(), 0);
-    }
-
-    // DFS must emit one LengthDone event for every slot of the returned
-    // vector, with values matching the vector. This is what the CLI relies
-    // on to print per-length lines through the same plumbing as DP.
+    // LengthDone must fire for every slot of the returned vector with values
+    // matching the vector, in strictly ascending order.
     #[test]
     fn dfs_length_done_events_match_returned_counts() {
         let g = build_grid_definition(&[3, 3], 0);
@@ -754,9 +712,6 @@ mod tests {
         assert_eq!(*seen.borrow(), expected);
     }
 
-    // Fast path must still emit LengthDone events so the CLI gets the same
-    // streaming output for every DFS invocation, regardless of whether the
-    // constrained search actually ran.
     #[test]
     fn dfs_length_done_events_fire_on_fast_path() {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
@@ -773,21 +728,108 @@ mod tests {
         assert_eq!(*seen.borrow(), expected);
     }
 
-    // DfsEvent::Progress carries a running tally. By the time the final
-    // Progress event fires every contribution has been accumulated, so its
-    // snapshot must equal the returned `counts`.
     #[test]
-    fn dfs_progress_final_snapshot_matches_counts() {
+    fn iddfs_length_done_events_fire_in_ascending_order() {
         let g = build_grid_definition(&[3, 3], 0);
         let blocks = compute_blocks(&g);
         let n = g.points.len();
-        let last = std::cell::RefCell::new(Vec::<u128>::new());
+        let seen = std::cell::RefCell::new(Vec::<usize>::new());
         let counts = count_patterns_dfs(n, &blocks, n, |event| {
-            if let DfsEvent::Progress { counts } = event {
-                last.borrow_mut().clear();
-                last.borrow_mut().extend_from_slice(counts);
+            if let DfsEvent::LengthDone { length, count } = event {
+                seen.borrow_mut().push(length);
+                assert_eq!(count, counts_oracle(&g)[length]);
             }
         });
-        assert_eq!(*last.borrow(), counts);
+        let expected: Vec<usize> = (0..=n).collect();
+        assert_eq!(*seen.borrow(), expected);
+        let _ = counts;
+    }
+
+    // Oracle for iddfs_length_done_events_fire_in_ascending_order.
+    fn counts_oracle(g: &crate::grid::GridDefinition) -> Vec<u128> {
+        let blocks = compute_blocks(g);
+        count_patterns_dp(g.points.len(), &blocks, g.points.len(), |_| {})
+    }
+
+    #[derive(Debug, PartialEq)]
+    enum PassEv {
+        Start(usize),
+        Tick(usize),
+        Done(usize),
+    }
+
+    #[test]
+    fn iddfs_pass_start_precedes_pass_ticks_and_length_done_for_each_target() {
+        let g = build_grid_definition(&[3, 3], 0);
+        let blocks = compute_blocks(&g);
+        let n = g.points.len();
+        let log = std::cell::RefCell::new(Vec::<PassEv>::new());
+        count_patterns_dfs(n, &blocks, n, |event| match event {
+            DfsEvent::PassStart { target, .. } => log.borrow_mut().push(PassEv::Start(target)),
+            DfsEvent::PassTick { target, .. } => log.borrow_mut().push(PassEv::Tick(target)),
+            DfsEvent::LengthDone { length, .. } => log.borrow_mut().push(PassEv::Done(length)),
+        });
+
+        let log = log.into_inner();
+        // Lengths 0 and 1 emit Done before the first pass.
+        assert_eq!(log[0], PassEv::Done(0));
+        assert_eq!(log[1], PassEv::Done(1));
+
+        // For each target ≥ 2: one Start, then pair_total Ticks, then one Done.
+        let pair_total = n * (n - 1);
+        let mut pos = 2usize;
+        for target in 2..=n {
+            assert_eq!(log[pos], PassEv::Start(target), "target={target}");
+            pos += 1;
+            for _ in 0..pair_total {
+                assert_eq!(log[pos], PassEv::Tick(target), "target={target}");
+                pos += 1;
+            }
+            assert_eq!(log[pos], PassEv::Done(target), "target={target}");
+            pos += 1;
+        }
+        assert_eq!(pos, log.len());
+    }
+
+    #[test]
+    fn iddfs_pass_tick_count_matches_pair_total() {
+        let g = build_grid_definition(&[3, 3], 0);
+        let blocks = compute_blocks(&g);
+        let n = g.points.len();
+        let expected_per_pass = dfs_pass_ticks(n);
+
+        let current_total = std::cell::Cell::new(0u64);
+        count_patterns_dfs(n, &blocks, n, |event| match event {
+            DfsEvent::PassStart { pair_total, .. } => {
+                assert_eq!(pair_total, expected_per_pass);
+                current_total.set(0);
+            }
+            DfsEvent::PassTick { pair_index, .. } => {
+                current_total.set(pair_index);
+            }
+            DfsEvent::LengthDone { .. } => {
+                // After Done, the tick counter must have reached pair_total
+                // (only meaningful for passes ≥ 2 where a Start was emitted).
+            }
+        });
+        // Final pass must have ticked all the way to pair_total.
+        assert_eq!(current_total.get(), expected_per_pass);
+    }
+
+    #[test]
+    fn iddfs_no_pass_events_on_unconstrained_fast_path() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
+        let blocks = compute_blocks(&g);
+        assert!(blocks.iter().all(|&b| b == 0));
+        let n = g.points.len();
+        let pass_starts = std::cell::Cell::new(0usize);
+        let pass_ticks = std::cell::Cell::new(0usize);
+        count_patterns_dfs(n, &blocks, n, |event| match event {
+            DfsEvent::PassStart { .. } => pass_starts.set(pass_starts.get() + 1),
+            DfsEvent::PassTick { .. } => pass_ticks.set(pass_ticks.get() + 1),
+            DfsEvent::LengthDone { .. } => {}
+        });
+        assert_eq!(pass_starts.get(), 0);
+        assert_eq!(pass_ticks.get(), 0);
     }
 }
