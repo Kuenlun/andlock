@@ -21,6 +21,8 @@ use std::io;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use sysinfo::System;
+
 use anyhow::{Result, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
 
@@ -29,7 +31,9 @@ use clap::{Args, Parser, Subcommand};
 use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
-use andlock::dp::{DpEvent, count_patterns_dp};
+use andlock::counter::{
+    Algorithm, DfsEvent, DpEvent, choose_algorithm, count_patterns_dfs, count_patterns_dp,
+};
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
 
 #[derive(Parser)]
@@ -51,7 +55,7 @@ enum Command {
         /// Axis sizes separated by 'x' (e.g. "3x3", "10", "2x3x2").
         dims: String,
 
-        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid). Total grid + free points must not exceed 25.
+        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid). Total grid + free points must not exceed 31.
         #[arg(short = 'f', long, default_value_t = 0)]
         free_points: usize,
 
@@ -66,7 +70,7 @@ enum Command {
         #[arg(short, long)]
         quiet: bool,
     },
-    /// Load a `GridDefinition` from a JSON file and count its patterns (0–25 points).
+    /// Load a `GridDefinition` from a JSON file and count its patterns (0–31 points).
     /// Length 0 (the empty/null pattern) is counted as a valid pattern unless `--min-length` excludes it.
     /// Pass `-` as the path to read from stdin, enabling pipelines like:
     ///   andlock grid "3x3" --export-json | andlock file -
@@ -146,6 +150,79 @@ fn bar_style() -> ProgressStyle {
         .progress_chars("━━╌")
 }
 
+/// Per-pass bar for IDDFS. Each pass counts patterns of a single length, so
+/// the `{eta}` reflects the completion of *that* length only — the template
+/// spells this out to avoid confusion with a global ETA.
+fn iddfs_bar_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {msg}  [{bar:40.cyan/dim}]  {percent}%  partial eta {eta}")
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("━━╌")
+}
+
+/// Returns 20 % of the memory the OS reports as currently available.
+/// Falls back to 0 when the information cannot be obtained, which causes
+/// the router to always choose DFS — the safe default.
+fn available_memory_budget() -> u64 {
+    let mut sys = System::new();
+    sys.refresh_memory();
+    sys.available_memory() / 5
+}
+
+fn print_length(
+    length: usize,
+    count: u128,
+    min_length: usize,
+    max_length: usize,
+    pb: Option<&ProgressBar>,
+    lines: &mut Vec<String>,
+) {
+    if length >= min_length && length <= max_length && count > 0 {
+        let line = format!("  Length {length:>2}: {count}");
+        match pb {
+            Some(pb) if !pb.is_hidden() => pb.println(&line),
+            _ => println!("{line}"),
+        }
+        lines.push(line);
+    }
+}
+
+fn run_iddfs(
+    n: usize,
+    blocks: &[u32],
+    max_length: usize,
+    min_length: usize,
+    quiet: bool,
+    lines: &mut Vec<String>,
+) -> Vec<u128> {
+    // One progress bar per pass: IDDFS counts a single length at a time, and
+    // indicatif's `{eta}` on that bar is the ETA to finish *this* length —
+    // rendered as "partial eta" by `iddfs_bar_style` so the user never mistakes
+    // it for a global estimate.
+    let mut pass_pb: Option<ProgressBar> = None;
+    count_patterns_dfs(n, blocks, max_length, |event| match event {
+        DfsEvent::PassStart { target, pair_total } => {
+            if !quiet {
+                let pb = ProgressBar::new(pair_total);
+                pb.set_style(iddfs_bar_style());
+                pb.set_message(format!("Counting length {target} (IDDFS)"));
+                pb.enable_steady_tick(Duration::from_millis(80));
+                pass_pb = Some(pb);
+            }
+        }
+        DfsEvent::PassTick { .. } => {
+            if let Some(ref pb) = pass_pb {
+                pb.inc(1);
+            }
+        }
+        DfsEvent::LengthDone { length, count } => {
+            if let Some(pb) = pass_pb.take() {
+                pb.finish_and_clear();
+            }
+            print_length(length, count, min_length, max_length, None, lines);
+        }
+    })
+}
+
 fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, quiet: bool) {
     let n = grid.points.len();
     let dim = grid.dimensions;
@@ -167,48 +244,48 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
         pb.finish_and_clear();
     }
 
-    // DP — total masks the outer loop will tick through: 2^n − 1
-    let num_masks: u64 = (1u64 << n).saturating_sub(1);
-    let dp_pb = if quiet {
+    let algorithm = choose_algorithm(n, available_memory_budget());
+
+    // DP uses a single global bar (one tick per bitmask, 2ⁿ − 1 total).
+    // IDDFS manages one bar per pass inside its event closure instead.
+    let count_pb: Option<ProgressBar> = if quiet || matches!(algorithm, Algorithm::Dfs) {
         None
     } else {
-        let pb = ProgressBar::new(num_masks);
+        let pb = ProgressBar::new((1u64 << n).saturating_sub(1));
         pb.set_style(bar_style());
-        pb.set_message(format!("Counting patterns ({n} points)"));
+        pb.set_message(format!("Counting patterns ({n} points, DP)"));
         pb.enable_steady_tick(Duration::from_millis(80));
         Some(pb)
     };
 
-    // Per-length lines are printed the moment they are finalized (above the
-    // progress bar via `pb.println`), so the user sees results accumulate live
-    // instead of getting a single batch at the end. We still keep them in
-    // `lines` to size the final separator.
+    // Per-length lines are printed the moment they are finalized so the user
+    // sees results live. We also keep them in `lines` to size the separator.
     let mut lines: Vec<String> = Vec::new();
     let t1 = Instant::now();
-    let counts = count_patterns_dp(n, &blocks, max_length, |event| match event {
-        DpEvent::Mask => {
-            if let Some(ref pb) = dp_pb {
-                pb.inc(1);
-            }
-        }
-        DpEvent::LengthDone { length, count } => {
-            if length >= min_length && length <= max_length && count > 0 {
-                let line = format!("  Length {length:>2}: {count}");
-                // `pb.println` prints above the bar without corrupting it on a
-                // TTY, but is a no-op when the bar is hidden (e.g. stdout
-                // piped). Fall back to plain `println!` in that case so the
-                // per-length lines are never silently dropped.
-                match dp_pb.as_ref() {
-                    Some(pb) if !pb.is_hidden() => pb.println(&line),
-                    _ => println!("{line}"),
+    let counts = match algorithm {
+        Algorithm::Dp => count_patterns_dp(n, &blocks, max_length, |event| match event {
+            DpEvent::Mask => {
+                if let Some(ref pb) = count_pb {
+                    pb.inc(1);
                 }
-                lines.push(line);
             }
-        }
-    });
+            DpEvent::LengthDone { length, count } => {
+                print_length(
+                    length,
+                    count,
+                    min_length,
+                    max_length,
+                    count_pb.as_ref(),
+                    &mut lines,
+                );
+            }
+        }),
+        // IDDFS emits final per-length counts one pass at a time.
+        Algorithm::Dfs => run_iddfs(n, &blocks, max_length, min_length, quiet, &mut lines),
+    };
     let elapsed = t1.elapsed();
 
-    if let Some(pb) = dp_pb {
+    if let Some(pb) = count_pb {
         pb.finish_and_clear();
     }
 
