@@ -733,26 +733,33 @@ mod tests {
         }
     }
 
-    // Regression test: with n=21 the sum of patterns exceeds u64::MAX (≈1.84×10¹⁹)
-    // because 21! ≈ 5.1×10¹⁹. Before the fix, `counts` used u64 and panicked with
-    // "attempt to add with overflow" on `grid 4x4 -f 5`.
-    // The layered DP brought the peak from ~700 MB down to ~125 MB, but the test
-    // remains gated to keep `cargo test` fast.
+    // Regression test: at n=21 with 5 free points, per-endpoint `ways` values at
+    // intermediate mask sizes reach the u64 ceiling and would wrap silently if
+    // the DP table were not u128, producing a non-monotonic `counts` sequence.
+    // Final counts[21] is ≈7.29×10¹⁸ — below u64::MAX thanks to the 4×4
+    // collinearity blockers, so we cannot detect the bug from counts[n] alone;
+    // we lock in monotonicity across every length instead.
+    //
+    // Cheaper sibling of `count_4x4_plus_8_free_is_monotonic_in_length`
+    // (~125 MB vs ~1 GB after the layered DP) so the invariant has a runnable
+    // check on smaller hardware.
     #[test]
     #[ignore = "allocates ~125 MB — run manually with: cargo test -- --ignored"]
-    fn count_4x4_plus_5_free_does_not_overflow() {
+    fn count_4x4_plus_5_free_is_monotonic_in_length() {
         let g = build_grid_definition(&[4, 4], 5);
         let blocks = compute_blocks(&g);
         let n = g.points.len();
         assert_eq!(n, 21);
         let counts = count_patterns_dp(n, &blocks, n, |_| {});
-        // In a zero-blocker graph, counts[n] = n!; free points guarantee many
-        // paths exceed u64::MAX, so u128 is necessary.
-        assert!(
-            counts[n] > u128::from(u64::MAX),
-            "expected counts[21] to exceed u64::MAX but got {}",
-            counts[n]
-        );
+        for k in 1..=n {
+            assert!(
+                counts[k] >= counts[k - 1],
+                "counts[{k}]={} must be >= counts[{}]={}; DP likely overflowed",
+                counts[k],
+                k - 1,
+                counts[k - 1]
+            );
+        }
     }
 
     // Regression test for silent overflow in the DP table itself. At n=24, the
