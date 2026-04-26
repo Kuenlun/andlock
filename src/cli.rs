@@ -26,7 +26,19 @@ use sysinfo::System;
 use anyhow::{Result, anyhow};
 use indicatif::{ProgressBar, ProgressStyle};
 
+use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Args, Parser, Subcommand};
+
+// Cargo-like help colours: green headers, cyan flags. Degrades gracefully when NO_COLOR or non-TTY.
+const STYLES: Styles = Styles::styled()
+    .header(
+        AnsiColor::Green
+            .on_default()
+            .effects(Effects::BOLD.insert(Effects::UNDERLINE)),
+    )
+    .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
+    .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+    .placeholder(AnsiColor::Cyan.on_default());
 
 use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
@@ -40,7 +52,8 @@ use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse
 #[command(
     name = "andlock",
     version,
-    about = "Count Android-style unlock patterns on n-dimensional nodes"
+    about = "Count Android-style unlock patterns on n-dimensional nodes",
+    styles = STYLES
 )]
 struct Cli {
     #[command(subcommand)]
