@@ -18,12 +18,14 @@
    - Allowed types: `feat`, `fix`, `refactor`, `ci`, `docs`, `style`, `test`, `chore`, `perf`, `build`.
    - Subject in imperative mood, lowercase, no trailing period, under ~72 characters.
    - Pick the scope from the primary module or area touched, omit it only when the change is genuinely cross-cutting.
+   - If the change is backwards incompatible per SemVer 2.0.0, append `!` after the type or scope (`feat!:`, `refactor(api)!:`). Use this only for real public-API breaks, not for internal refactors.
 2. **Body:**
    - Optional single high-level sentence stating the _intent_ of the change (the "why"). Include it when the motivation is not obvious from the diff, omit it when the subject and bullets already make the intent self-evident.
    - Bulleted list of the concrete technical changes (the "what"), each starting with an imperative verb (Add, Remove, Rename, Refactor, Implement, Replace, Expose, Gate, Wire, Raise, Lower, Document).
    - Reference concrete identifiers, file paths, module names, flags, dependencies, and numeric thresholds when they clarify the change.
    - Each bullet covers one change and is self-contained. Skip trivial mechanical edits (auto-formatting, import reordering) unless they are the point of the commit.
    - For a tiny single-purpose commit, the subject line alone is acceptable and the body may be omitted entirely.
+   - If the subject uses `!`, end the body with a `BREAKING CHANGE: <description>` footer (separated by a blank line) describing what breaks and the migration path. The footer is required by Conventional Commits when `!` is used.
 3. **Tone:** Professional, Rustacean. Emphasise safety, correctness, performance, and idiomatic patterns. No marketing language, no filler, no greetings.
 4. **Punctuation:** Do not use em dashes (`—`) or en dashes (`–`). Do not use semicolons (`;`). Prefer short sentences and commas.
 5. **Format:** Output the subject on the first line, a blank line, then the body if present. Wrap body lines at around 72 characters. No surrounding code fences, no preamble, no sign-off, no co-author trailers.

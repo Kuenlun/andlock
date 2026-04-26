@@ -17,6 +17,7 @@
    - One line, Conventional Commits (Cocogitto style): `type(scope): subject`.
    - Allowed types: `feat`, `fix`, `refactor`, `ci`, `docs`, `style`, `test`, `chore`, `perf`, `build`.
    - Subject in imperative mood, lowercase, no trailing period, under ~72 characters.
+   - If the change is backwards incompatible per SemVer 2.0.0, append `!` after the type or scope (`feat!:`, `refactor(api)!:`). Use this only for real public-API breaks, not for internal refactors. When `!` is used, end the body with a `BREAKING CHANGE: <description>` footer (separated by a blank line) describing what breaks and the migration path, as required by Conventional Commits.
 2. **Body:**
    - One high-level sentence stating the _intent_ of the change (the "why").
    - A bulleted list of the concrete technical changes (the "what"), each starting with an imperative verb (Add, Remove, Rename, Refactor, Implement, Replace, Expose, Gate, Wire, Raise, Lower, Document).
