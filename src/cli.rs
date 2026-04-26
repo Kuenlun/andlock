@@ -67,7 +67,7 @@ enum Command {
         #[command(flatten)]
         range: RangeArgs,
 
-        /// Suppress progress and timing output (results still printed to stdout).
+        /// Suppress progress, timing output, and the ASCII grid preview (results still printed to stdout).
         #[arg(short, long)]
         quiet: bool,
     },
@@ -91,7 +91,7 @@ enum Command {
         #[command(flatten)]
         range: RangeArgs,
 
-        /// Suppress progress and timing output (results still printed to stdout).
+        /// Suppress progress, timing output, and the ASCII grid preview (results still printed to stdout).
         #[arg(short, long)]
         quiet: bool,
     },
