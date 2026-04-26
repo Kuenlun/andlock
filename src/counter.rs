@@ -24,8 +24,9 @@ use crate::grid::MAX_POINTS;
 /// `LengthDone` to print the count of patterns of a given length as soon as it
 /// is fully known — before the whole DP finishes.
 pub enum DpEvent {
-    /// One outer-loop mask has been processed (fired `2ⁿ − 1` times during the
-    /// constrained DP; not fired at all on the unconstrained fast path).
+    /// One outer-loop mask has been processed. Fired exactly
+    /// [`dp_mask_ticks(n, max_length)`](dp_mask_ticks) times during the
+    /// constrained DP; not fired at all on the unconstrained fast path.
     Mask,
     /// `counts[length]` has received its last contribution and is now final.
     LengthDone { length: usize, count: u128 },
@@ -93,58 +94,123 @@ fn binomial(n: usize, k: usize) -> u128 {
 }
 
 /// Returns the peak number of bytes [`count_patterns_dp`] would allocate for
-/// `n` nodes, assuming a full run (`max_length = n`).
+/// `n` nodes when called with `max_length`.
 ///
 /// The layered DP holds at most two adjacent popcount layers — popcount `p`
-/// (read source) and popcount `p+1` (write destination) — together with a
-/// `2ⁿ × u32` mask→layer-index lookup. Each mask of popcount `p` stores
-/// only `p` `u128` slots (one per valid endpoint), so the peak across all
-/// transitions is
+/// (read source) and popcount `p+1` (write destination). Each mask of
+/// popcount `p` stores only `p` `u128` slots (one per valid endpoint), and
+/// the layer-local index of a destination mask is computed on the fly as
+/// its colex rank (a perfect hash into `[0, C(n, p+1))`), so no `2ⁿ`
+/// auxiliary table is allocated. A destination layer for popcount `p+1` is
+/// only allocated while `p+1 < max_length`; once the cap is reached the
+/// source layer is consumed but no further layer is built.
 ///
-/// ```text
-///   max_p [ C(n, p) · p + C(n, p+1) · (p+1) ] · 16   +   2ⁿ · 4
-/// ```
-///
-/// This is ~6× lower than the previous `2ⁿ · n · 16` flat table for typical
-/// `n`. Uses saturating arithmetic so callers can pass any `n`.
+/// `max_length` is clamped to `n`; values above that are equivalent to `n`
+/// (passing `max_length > n` to [`count_patterns_dp`] itself panics, so the
+/// estimator simply normalises the input rather than mirroring the panic).
+/// Uses saturating arithmetic so callers can pass any `n` and any
+/// `max_length` without overflowing intermediate products.
 #[must_use]
-pub fn dp_table_bytes(n: usize) -> u64 {
-    if n == 0 {
-        // Only `counts[0] = 1` is allocated; no DP layers, no index table.
-        return 16;
-    }
-    let n_c = n.min(63);
+pub fn dp_table_bytes(n: usize, max_length: usize) -> u64 {
+    let max_length = max_length.min(n);
 
-    // Index table: 2ⁿ · 4 bytes (always allocated once per call).
-    let idx_bytes: u128 = (1u128 << n_c).saturating_mul(4);
+    // counts vector: max_length+1 u128 slots, always allocated.
+    let counts_bytes: u128 = (max_length as u128).saturating_add(1).saturating_mul(16);
+
+    // Early exit in the DP body: when n == 0 or max_length == 0 the function
+    // returns before allocating any DP layer.
+    if n == 0 || max_length == 0 {
+        return u64::try_from(counts_bytes).unwrap_or(u64::MAX);
+    }
+
+    let n_c = n.min(63);
+    let l = max_length.min(n_c);
 
     // Peak DP layer pair, in u128 entries (×16 bytes at the end).
-    // Lower-bound the peak by the layer-1 init (n entries) for the n=1 case
-    // where the loop range below is empty.
+    //
+    // Layer 1 (`dp_curr` initial) is unconditionally allocated to `n` entries.
+    // For iteration `p`:
+    //   * `dp_curr` holds the popcount-`p` layer — non-empty only when it was
+    //     written as a destination by the previous iteration, i.e. `p < l`
+    //     (or always for `p == 1`, hard-coded by the initialisation).
+    //   * `dp_next` holds the popcount-`p+1` layer — allocated only while
+    //     `p + 1 < l`.
     let mut peak_pair_entries: u128 = n_c as u128;
-    for p in 1..n_c {
-        let pair = binomial(n_c, p)
-            .saturating_mul(p as u128)
-            .saturating_add(binomial(n_c, p + 1).saturating_mul((p + 1) as u128));
+
+    // p == 1 (special-cased: dp_curr is always sized n).
+    let dp_next_p1 = if 2 < l {
+        binomial(n_c, 2).saturating_mul(2)
+    } else {
+        0
+    };
+    let pair_p1 = (n_c as u128).saturating_add(dp_next_p1);
+    if pair_p1 > peak_pair_entries {
+        peak_pair_entries = pair_p1;
+    }
+
+    // p >= 2.
+    for p in 2..=n_c {
+        let dp_curr = if p < l {
+            binomial(n_c, p).saturating_mul(p as u128)
+        } else {
+            0
+        };
+        let dp_next = if p + 1 < l {
+            binomial(n_c, p + 1).saturating_mul((p + 1) as u128)
+        } else {
+            0
+        };
+        let pair = dp_curr.saturating_add(dp_next);
         if pair > peak_pair_entries {
             peak_pair_entries = pair;
         }
     }
 
     let dp_bytes = peak_pair_entries.saturating_mul(16);
-    let total = dp_bytes.saturating_add(idx_bytes);
+    let total = dp_bytes.saturating_add(counts_bytes);
     u64::try_from(total).unwrap_or(u64::MAX)
 }
 
-/// Returns [`Algorithm::Dp`] if the DP table fits within `memory_budget`
-/// bytes, otherwise [`Algorithm::Dfs`].
+/// Returns [`Algorithm::Dp`] if [`dp_table_bytes`] for `(n, max_length)` fits
+/// within `memory_budget` bytes, otherwise [`Algorithm::Dfs`].
+///
+/// Callers that want to *force* an algorithm should bypass this helper and
+/// construct the [`Algorithm`] variant directly.
 #[must_use]
-pub fn choose_algorithm(n: usize, memory_budget: u64) -> Algorithm {
-    if dp_table_bytes(n) <= memory_budget {
+pub fn choose_algorithm(n: usize, max_length: usize, memory_budget: u64) -> Algorithm {
+    if dp_table_bytes(n, max_length) <= memory_budget {
         Algorithm::Dp
     } else {
         Algorithm::Dfs
     }
+}
+
+/// Returns the exact number of [`DpEvent::Mask`] events
+/// [`count_patterns_dp`] will fire for `(n, max_length)` on a constrained
+/// grid. The unconstrained fast path emits zero `Mask` events regardless.
+///
+/// Equal to `Σ_{p=1}^{max_length−1} C(n, p)` — one event per popcount-`p`
+/// mask processed, summed across the popcount layers the DP actually visits
+/// (which stops at `max_length − 1`, the last layer that can contribute to
+/// `counts[max_length]`). Callers use this value to size a per-mask
+/// progress bar that reaches exactly 100% when the DP returns.
+///
+/// `max_length` is clamped to `n`, mirroring [`dp_table_bytes`]. Returns
+/// `0` for `n == 0` or `max_length < 2` (the DP body either exits early or
+/// finalises every length without entering the popcount loop).
+#[must_use]
+pub fn dp_mask_ticks(n: usize, max_length: usize) -> u64 {
+    let max_length = max_length.min(n);
+    if n == 0 || max_length < 2 {
+        return 0;
+    }
+    let n_c = n.min(63);
+    let l = max_length.min(n_c);
+    let mut total: u128 = 0;
+    for p in 1..l {
+        total = total.saturating_add(binomial(n_c, p));
+    }
+    u64::try_from(total).unwrap_or(u64::MAX)
 }
 
 /// Counts every valid pattern, routing to DP or DFS based on `algorithm`.
@@ -189,6 +255,47 @@ const fn gosper_next(x: u32) -> u32 {
     (((r ^ x) >> 2) / c) | r
 }
 
+/// Pascal's triangle, indexed `[n][k] = C(n, k)`. Sized to cover every
+/// `n ≤ MAX_POINTS` (= 31) plus a small margin for off-by-one indexing
+/// inside [`colex_rank`]. `C(32, 16) ≈ 6.0 × 10⁸` fits in `u32`.
+const BINOM: [[u32; 33]; 33] = {
+    let mut t = [[0u32; 33]; 33];
+    let mut i = 0;
+    while i < 33 {
+        t[i][0] = 1;
+        let mut j = 1;
+        while j <= i {
+            t[i][j] = t[i - 1][j - 1] + t[i - 1][j];
+            j += 1;
+        }
+        i += 1;
+    }
+    t
+};
+
+/// Colex rank of a bitmask of popcount `k`: a perfect hash into
+/// `[0, C(n, k))` where bit positions `a_1 < … < a_k` map to
+/// `Σ C(a_i, i)`.
+///
+/// Replaces the `2ⁿ × u32` mask→index lookup table the layered DP used to
+/// allocate. Crucially, Gosper enumeration walks popcount-`k` masks in
+/// numeric ascending order — which equals colex-rank order for fixed
+/// popcount — so the source layer can still be read with an incrementing
+/// counter; only writes into the destination layer need an explicit rank.
+#[inline]
+const fn colex_rank(mut mask: u32) -> u32 {
+    let mut rank: u32 = 0;
+    let mut k: usize = 1;
+    while mask != 0 {
+        let bit = mask & mask.wrapping_neg();
+        let pos = bit.trailing_zeros() as usize;
+        rank += BINOM[pos][k];
+        mask ^= bit;
+        k += 1;
+    }
+    rank
+}
+
 /// Computes pattern counts when there are no visibility constraints.
 ///
 /// When every `blocks[i * n + j] == 0` every move is unconditionally legal, so
@@ -226,10 +333,12 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 /// Two adjacent popcount layers are alive at any time: the source layer
 /// (popcount `p`, read) and the destination (popcount `p+1`, written).
 /// Each mask of popcount `p` packs only `p` `u128` slots — one per valid
-/// endpoint — and a `2ⁿ × u32` table maps mask → layer-local index for the
-/// destination layer (the source is enumerated in lockstep with Gosper).
-/// Peak usage is roughly 6× lower than a flat `2ⁿ × n × u128` table; see
-/// [`dp_table_bytes`].
+/// endpoint. Layer-local indices are computed via [`colex_rank`] instead
+/// of stored in a `2ⁿ × u32` lookup table, which keeps the working set
+/// proportional to the actual popcount layers rather than `2ⁿ`. The source
+/// layer is read with an incrementing counter that mirrors Gosper order
+/// (= colex order for fixed popcount); only writes into the destination
+/// layer pay the O(p) rank computation. See [`dp_table_bytes`].
 ///
 /// # Complexity
 /// With `L = max_length`, extension work is bounded by the prefixes of length
@@ -273,16 +382,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
         return counts;
     }
 
-    let num_masks: usize = 1 << n;
     let full_mask: u32 = (1u32 << n) - 1;
-
-    // mask_to_index[m] = layer-local index of `m` within its popcount class,
-    // valid only for masks belonging to the popcount currently being written.
-    // Repopulated before each transition `p → p+1`. The source layer does not
-    // need a lookup: Gosper enumeration visits its masks in the same order
-    // they were assigned indices, so `idx_curr` is just an incrementing
-    // counter.
-    let mut mask_to_index = vec![0u32; num_masks];
 
     // dp_curr stores the current popcount layer in mask-major layout, packing
     // only the `p` valid endpoints per popcount-`p` mask. The endpoint offset
@@ -291,14 +391,12 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
     //
     // Per-state values can reach (len-1)! at the full mask, which exceeds
     // u64::MAX starting around n=22 — hence u128 (same rationale as `counts`).
-    let mut dp_curr: Vec<u128> = vec![0u128; n];
-    // Gosper enumeration of popcount-1 masks visits 1<<0, 1<<1, …, 1<<(n-1)
-    // in order, so the layer-local index for 1<<v is `v`. Iterating with a
-    // parallel `u32` counter avoids a usize→u32 truncation cast.
-    for (v, v_u32) in (0..n).zip(0u32..) {
-        dp_curr[v] = 1;
-        mask_to_index[1usize << v] = v_u32;
-    }
+    //
+    // Source-layer indices are an incrementing counter (Gosper order ==
+    // colex order for fixed popcount); destination-layer indices are
+    // computed on the fly via `colex_rank`, so no `2ⁿ` lookup table is
+    // allocated.
+    let mut dp_curr: Vec<u128> = vec![1u128; n];
     counts[1] = n as u128;
     on_event(DpEvent::LengthDone {
         length: 1,
@@ -307,10 +405,11 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
 
     // Enumerate popcount classes ascending so every proper subset of a
     // popcount-`p` mask is already final by the time we read it. Streaming
-    // `LengthDone` events fire as soon as a class completes. Masks whose
-    // popcount is `≥ max_length` skip work but still tick so the caller's
-    // mask-granular progress bar reaches 100%.
-    for p in 1..=n {
+    // `LengthDone` events fire as soon as a class completes. The loop
+    // stops at `max_length - 1`: the popcount-`(max_length-1)` layer is
+    // the last one whose extensions contribute to `counts[max_length]`,
+    // and no caller-visible state is produced at higher popcounts.
+    for p in 1..max_length {
         let next_p = p + 1;
         // dp_next is only allocated when a future iteration will read from
         // it (`next_p < max_length`). At `next_p == max_length` we still
@@ -322,32 +421,25 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
         } else {
             Vec::new()
         };
-        if need_dp_next {
-            populate_layer_indices(&mut mask_to_index, n, next_p);
-        }
 
         process_layer(LayerCtx {
             n,
             full_mask,
             blocks,
             p,
-            max_length,
             need_dp_next,
             dp_curr: &dp_curr,
             dp_next: &mut dp_next,
-            mask_to_index: &mask_to_index,
             counts: &mut counts,
             on_event: &mut on_event,
         });
 
         // All contributions to counts[p+1] came from popcount-p masks, so
         // the value is now final.
-        if p < max_length {
-            on_event(DpEvent::LengthDone {
-                length: p + 1,
-                count: counts[p + 1],
-            });
-        }
+        on_event(DpEvent::LengthDone {
+            length: next_p,
+            count: counts[next_p],
+        });
 
         // Hand the destination layer to the next iteration. When
         // `need_dp_next` was false, `dp_next` is empty — `dp_curr` becomes
@@ -367,90 +459,66 @@ struct LayerCtx<'a, F: FnMut(DpEvent)> {
     full_mask: u32,
     blocks: &'a [u32],
     p: usize,
-    max_length: usize,
     need_dp_next: bool,
     dp_curr: &'a [u128],
     dp_next: &'a mut [u128],
-    mask_to_index: &'a [u32],
     counts: &'a mut [u128],
     on_event: &'a mut F,
-}
-
-/// Assigns layer-local indices to every popcount-`popcount` mask, in Gosper
-/// (lexicographic) order — the same order [`process_layer`] later visits the
-/// source layer with an incrementing counter.
-fn populate_layer_indices(mask_to_index: &mut [u32], n: usize, popcount: usize) {
-    let mut idx: u32 = 0;
-    let mut mask: u32 = (1u32 << popcount) - 1;
-    let last: u32 = mask << (n - popcount);
-    loop {
-        mask_to_index[mask as usize] = idx;
-        idx += 1;
-        if mask == last {
-            break;
-        }
-        mask = gosper_next(mask);
-    }
 }
 
 /// Processes every popcount-`p` mask exactly once, contributing its
 /// extensions to `counts[p+1]` and (when `need_dp_next`) to `dp_next`.
 ///
-/// Fires one [`DpEvent::Mask`] per mask regardless of `do_work`, so the
-/// caller's mask-granular progress bar advances even past `max_length`.
+/// Fires one [`DpEvent::Mask`] per mask. The caller is responsible for
+/// only invoking `process_layer` for popcounts that contribute work
+/// (`p < max_length`); the helper does no further bounds check.
 fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
     let LayerCtx {
         n,
         full_mask,
         blocks,
         p,
-        max_length,
         need_dp_next,
         dp_curr,
         dp_next,
-        mask_to_index,
         counts,
         on_event,
     } = ctx;
 
-    let do_work = p < max_length;
     let next_p = p + 1;
     let mut idx_curr: u32 = 0;
     let mut mask: u32 = (1u32 << p) - 1;
     let last: u32 = mask << (n - p);
     loop {
         on_event(DpEvent::Mask);
-        if do_work {
-            let base_curr = (idx_curr as usize) * p;
-            let mut visited = mask;
-            while visited != 0 {
-                let end_bit = visited & visited.wrapping_neg();
-                visited ^= end_bit;
-                let end = end_bit.trailing_zeros() as usize;
-                let end_off = (mask & (end_bit - 1)).count_ones() as usize;
-                let ways = dp_curr[base_curr + end_off];
-                if ways == 0 {
-                    continue;
-                }
+        let base_curr = (idx_curr as usize) * p;
+        let mut visited = mask;
+        while visited != 0 {
+            let end_bit = visited & visited.wrapping_neg();
+            visited ^= end_bit;
+            let end = end_bit.trailing_zeros() as usize;
+            let end_off = (mask & (end_bit - 1)).count_ones() as usize;
+            let ways = dp_curr[base_curr + end_off];
+            if ways == 0 {
+                continue;
+            }
 
-                let mut free = !mask & full_mask;
-                while free != 0 {
-                    let next_bit = free & free.wrapping_neg();
-                    free ^= next_bit;
-                    let next = next_bit.trailing_zeros() as usize;
+            let mut free = !mask & full_mask;
+            while free != 0 {
+                let next_bit = free & free.wrapping_neg();
+                free ^= next_bit;
+                let next = next_bit.trailing_zeros() as usize;
 
-                    let blockers = blocks[end * n + next];
-                    if mask & blockers == blockers {
-                        counts[next_p] += ways;
-                        if need_dp_next {
-                            let new_mask = (mask | next_bit) as usize;
-                            let idx_new = mask_to_index[new_mask] as usize;
-                            // `next_bit` is not in `mask`, so the set bits of
-                            // (mask | next_bit) below `next_bit` are exactly
-                            // the bits of `mask` below it.
-                            let next_off = (mask & (next_bit - 1)).count_ones() as usize;
-                            dp_next[idx_new * next_p + next_off] += ways;
-                        }
+                let blockers = blocks[end * n + next];
+                if mask & blockers == blockers {
+                    counts[next_p] += ways;
+                    if need_dp_next {
+                        let idx_new = colex_rank(mask | next_bit) as usize;
+                        // `next_bit` is not in `mask`, so the set bits of
+                        // (mask | next_bit) below `next_bit` are exactly
+                        // the bits of `mask` below it.
+                        let next_off = (mask & (next_bit - 1)).count_ones() as usize;
+                        dp_next[idx_new * next_p + next_off] += ways;
                     }
                 }
             }
@@ -988,6 +1056,208 @@ mod tests {
         });
         // Final pass must have ticked all the way to pair_total.
         assert_eq!(current_total.get(), expected_per_pass);
+    }
+
+    #[test]
+    fn dp_table_bytes_zero_n_or_zero_max_length_returns_counts_only() {
+        // n == 0: only counts[0..=0] is allocated, so 16 bytes.
+        assert_eq!(dp_table_bytes(0, 0), 16);
+        // n > 0 but max_length == 0: function returns before the index/DP
+        // allocations, so still only counts[0..=0] = 16 bytes.
+        assert_eq!(dp_table_bytes(31, 0), 16);
+    }
+
+    #[test]
+    fn dp_table_bytes_is_monotone_in_max_length() {
+        for n in 0..=10 {
+            let mut prev: u64 = 0;
+            for l in 0..=n {
+                let b = dp_table_bytes(n, l);
+                assert!(
+                    b >= prev,
+                    "dp_table_bytes(n={n}, max_length={l}) regressed: {b} < {prev}"
+                );
+                prev = b;
+            }
+        }
+    }
+
+    #[test]
+    fn dp_table_bytes_max_length_above_n_matches_full_run() {
+        // The function clamps `max_length` to `n` internally, so passing a
+        // value greater than `n` must yield the same byte count as `n`.
+        // We compare against `n` itself rather than recomputing the formula
+        // so the test exercises the public API.
+        for n in 1..=8 {
+            let full = dp_table_bytes(n, n);
+            assert_eq!(dp_table_bytes(n, n + 1), full, "n={n}, max_length=n+1");
+            assert_eq!(dp_table_bytes(n, 64), full, "n={n}, max_length=64");
+        }
+    }
+
+    #[test]
+    fn dp_table_bytes_handles_max_supported_n_without_overflow() {
+        // n = 31, full run: peak DP layer pair plus the 2³¹ · 4 B index table.
+        // Must not saturate to u64::MAX — we only need a finite, sensible bound.
+        let bytes = dp_table_bytes(31, 31);
+        assert!(bytes < u64::MAX);
+        assert!(bytes > (1u64 << 30), "expected at least 1 GiB, got {bytes}");
+    }
+
+    // Hand-verified expected sizes for n = 3 across every max_length.
+    //   p=1: dp_curr always = n = 3 entries (init).
+    //   p>=2: dp_curr = C(n,p)·p iff p < l, dp_next = C(n,p+1)·(p+1) iff p+1 < l.
+    //   counts = (l+1)·16 B. No mask→index lookup table — destination
+    //   indices come from `colex_rank`.
+    #[test]
+    fn dp_table_bytes_n3_known_values() {
+        // max_length = 0 → early exit, counts only (1·16 = 16 B).
+        assert_eq!(dp_table_bytes(3, 0), 16);
+        // max_length = 1 → peak = 3 entries (48 B) + counts 32 B.
+        assert_eq!(dp_table_bytes(3, 1), 48 + 32);
+        // max_length = 2 → same peak = 3 entries (no dp_next allocated).
+        //   counts = 3·16 = 48 B.
+        assert_eq!(dp_table_bytes(3, 2), 48 + 48);
+        // max_length = 3 → peak at p=1 = 3 + C(3,2)·2 = 3 + 6 = 9 entries (144 B).
+        //   counts = 4·16 = 64 B.
+        assert_eq!(dp_table_bytes(3, 3), 144 + 64);
+    }
+
+    // Regression: a previous implementation allocated a `2ⁿ × u32` mask→index
+    // table during the DP regardless of `max_length`. For `n = 28` that table
+    // alone weighed exactly 1 GiB, so `grid 3x3x2 -f 10 --max-length 4`
+    // (n = 28, peak DP layers ≈ 169 KiB) was incorrectly routed to DFS under
+    // the default 1 GiB budget. With the colex-rank rewrite the index table
+    // is gone, and the call must select DP — even with a far tighter budget.
+    #[test]
+    fn choose_algorithm_picks_dp_for_high_n_with_tight_max_length() {
+        let one_gib: u64 = 1024 * 1024 * 1024;
+        assert_eq!(choose_algorithm(28, 4, one_gib), Algorithm::Dp);
+        // 1 MiB still leaves 5+ orders of magnitude of headroom over the
+        // ~169 KiB the DP actually needs.
+        assert_eq!(choose_algorithm(28, 4, 1024 * 1024), Algorithm::Dp);
+    }
+
+    // Verifies `colex_rank` is a perfect hash on each popcount class — the
+    // contract `process_layer` relies on for write-side indexing into
+    // `dp_next`. Sweeps every popcount-`k` mask of an n=12 universe and
+    // checks that the ranks are exactly `0..C(12, k)`.
+    #[test]
+    fn colex_rank_is_a_perfect_hash_per_popcount() {
+        let n: u32 = 12;
+        for k in 1..=n {
+            let mut mask: u32 = (1u32 << k) - 1;
+            let last: u32 = mask << (n - k);
+            let mut expected: u32 = 0;
+            loop {
+                assert_eq!(colex_rank(mask), expected, "n={n}, k={k}, mask={mask:#b}");
+                if mask == last {
+                    break;
+                }
+                mask = gosper_next(mask);
+                expected += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn choose_algorithm_picks_dp_when_capped_max_length_fits() {
+        // n = 24 with max_length = 24 needs roughly 1 GB.
+        // The mask→index table alone costs 2²⁴·4 B = 64 MiB regardless of
+        // max_length, so the budget must comfortably exceed that for the
+        // capped run to fit. 256 MiB does it.
+        let budget: u64 = 256 * 1024 * 1024;
+        assert_eq!(choose_algorithm(24, 24, budget), Algorithm::Dfs);
+        // …but the same n with a tight max_length cap fits comfortably,
+        // since `dp_next` is never allocated past the cap.
+        assert_eq!(choose_algorithm(24, 4, budget), Algorithm::Dp);
+    }
+
+    #[test]
+    fn choose_algorithm_zero_budget_always_picks_dfs_for_constrained_grids() {
+        // With a zero budget DP can never fit (at minimum it allocates the
+        // counts vector + index table), so the router must fall back to DFS.
+        for n in 1..=8 {
+            assert_eq!(choose_algorithm(n, n, 0), Algorithm::Dfs);
+        }
+    }
+
+    #[test]
+    fn choose_algorithm_huge_budget_always_picks_dp() {
+        for n in 0..=15 {
+            assert_eq!(choose_algorithm(n, n, u64::MAX), Algorithm::Dp);
+        }
+    }
+
+    // The constrained DP must emit exactly `dp_mask_ticks(n, max_length)`
+    // `Mask` events — the contract the CLI relies on to size its progress
+    // bar so it reaches 100% precisely when the run finishes. Sweep across
+    // every `max_length` cap to cover the early-exit branches as well.
+    #[test]
+    fn dp_mask_event_count_matches_dp_mask_ticks() {
+        let g = build_grid_definition(&[3, 3], 0);
+        let blocks = compute_blocks(&g);
+        assert!(
+            blocks.iter().any(|&b| b != 0),
+            "3×3 grid must be constrained for this test to exercise the popcount loop"
+        );
+        let n = g.points.len();
+        for cap in 0..=n {
+            let mask_count = std::cell::Cell::new(0u64);
+            count_patterns_dp(n, &blocks, cap, |event| {
+                if matches!(event, DpEvent::Mask) {
+                    mask_count.set(mask_count.get() + 1);
+                }
+            });
+            assert_eq!(
+                mask_count.get(),
+                dp_mask_ticks(n, cap),
+                "Mask event count diverges from dp_mask_ticks at cap={cap}"
+            );
+        }
+    }
+
+    #[test]
+    fn dp_mask_ticks_known_values() {
+        // n == 0 or max_length < 2: no popcount loop, no Mask events.
+        assert_eq!(dp_mask_ticks(0, 0), 0);
+        assert_eq!(dp_mask_ticks(5, 0), 0);
+        assert_eq!(dp_mask_ticks(5, 1), 0);
+        // max_length = 2 with n = 5: just popcount-1 masks → C(5,1) = 5.
+        assert_eq!(dp_mask_ticks(5, 2), 5);
+        // max_length = 3 with n = 5: C(5,1) + C(5,2) = 5 + 10 = 15.
+        assert_eq!(dp_mask_ticks(5, 3), 15);
+        // Full run: Σ_{p=1}^{n-1} C(n, p) = 2ⁿ − 2.
+        for n in 2..=10 {
+            let expected: u64 = (1u64 << n) - 2;
+            assert_eq!(dp_mask_ticks(n, n), expected, "n={n}");
+        }
+    }
+
+    #[test]
+    fn dp_mask_ticks_clamps_max_length_above_n() {
+        for n in 1..=8 {
+            let full = dp_mask_ticks(n, n);
+            assert_eq!(dp_mask_ticks(n, n + 1), full, "n={n}");
+            assert_eq!(dp_mask_ticks(n, 64), full, "n={n}");
+        }
+    }
+
+    // The unconstrained fast path must emit zero Mask events regardless of
+    // `max_length` — the bar never ticks but the run completes correctly.
+    #[test]
+    fn dp_mask_events_are_zero_on_unconstrained_fast_path() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
+        let blocks = compute_blocks(&g);
+        assert!(blocks.iter().all(|&b| b == 0));
+        let n = g.points.len();
+        let mask_count = std::cell::Cell::new(0u64);
+        count_patterns_dp(n, &blocks, n, |event| {
+            if matches!(event, DpEvent::Mask) {
+                mask_count.set(mask_count.get() + 1);
+            }
+        });
+        assert_eq!(mask_count.get(), 0);
     }
 
     #[test]
