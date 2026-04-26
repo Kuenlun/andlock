@@ -323,10 +323,10 @@ pub fn run() -> Result<()> {
             let grid = build_grid_definition(&parsed, free_points);
 
             if export_json {
-                if range.min_length.is_some() || range.max_length.is_some() {
-                    return Err(anyhow!(
-                        "--min-length and --max-length have no effect with --export-json"
-                    ));
+                if !quiet && (range.min_length.is_some() || range.max_length.is_some()) {
+                    eprintln!(
+                        "warning: --min-length and --max-length have no effect with --export-json"
+                    );
                 }
                 println!("{}", pretty_compact_json(&grid)?);
                 return Ok(());
@@ -366,10 +366,10 @@ pub fn run() -> Result<()> {
                 .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?;
 
             if export_json {
-                if range.min_length.is_some() || range.max_length.is_some() {
-                    return Err(anyhow!(
-                        "--min-length and --max-length have no effect with --export-json"
-                    ));
+                if !quiet && (range.min_length.is_some() || range.max_length.is_some()) {
+                    eprintln!(
+                        "warning: --min-length and --max-length have no effect with --export-json"
+                    );
                 }
                 let out = if simplify { canonicalize(&grid) } else { grid };
                 println!("{}", pretty_compact_json(&out)?);
