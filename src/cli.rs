@@ -53,7 +53,7 @@ enum Command {
     /// Length 0 (the empty/null pattern) is counted as a valid pattern unless `--min-length` excludes it.
     /// An ASCII preview is rendered for 1D/2D grids that fit ~40×20 cells; larger or 3D+ grids skip the preview (use `--export-json` to inspect coordinates).
     Grid {
-        /// Axis sizes separated by 'x' (e.g. "3x3", "10", "2x3x2").
+        /// Axis sizes separated by 'x' or 'X', with no surrounding whitespace (e.g. "3x3", "10", "2X3x2"). Each component must be a non-negative integer.
         dims: String,
 
         /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid). Each free point lives on its own extra dimension to guarantee non-collinearity. Total grid + free points must not exceed 31.
