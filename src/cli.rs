@@ -202,7 +202,7 @@ fn run_iddfs(
     count_patterns_dfs(n, blocks, max_length, |event| match event {
         DfsEvent::PassStart { target, pair_total } => {
             if !quiet {
-                let pb = ProgressBar::new(pair_total);
+                let pb = crate::signal::progress().add(ProgressBar::new(pair_total));
                 pb.set_style(iddfs_bar_style());
                 pb.set_message(format!("Counting length {target} (IDDFS)"));
                 pb.enable_steady_tick(Duration::from_millis(80));
@@ -231,7 +231,7 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     let block_pb = if quiet {
         None
     } else {
-        let pb = ProgressBar::new_spinner();
+        let pb = crate::signal::progress().add(ProgressBar::new_spinner());
         pb.set_style(spinner_style());
         pb.set_message(format!("Building block matrix ({n} points, {dim}D)"));
         pb.enable_steady_tick(Duration::from_millis(80));
@@ -251,7 +251,7 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     let count_pb: Option<ProgressBar> = if quiet || matches!(algorithm, Algorithm::Dfs) {
         None
     } else {
-        let pb = ProgressBar::new((1u64 << n).saturating_sub(1));
+        let pb = crate::signal::progress().add(ProgressBar::new((1u64 << n).saturating_sub(1)));
         pb.set_style(bar_style());
         pb.set_message(format!("Counting patterns ({n} points, DP)"));
         pb.enable_steady_tick(Duration::from_millis(80));
