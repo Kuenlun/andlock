@@ -19,7 +19,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 mod cli;
 mod json_format;
 mod preview;
+mod signal;
 
 fn main() -> anyhow::Result<()> {
+    signal::install_handler()?;
     cli::run()
 }
