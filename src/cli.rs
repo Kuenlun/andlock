@@ -56,7 +56,7 @@ enum Command {
         /// Axis sizes separated by 'x' (e.g. "3x3", "10", "2x3x2").
         dims: String,
 
-        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid). Total grid + free points must not exceed 31.
+        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid). Each free point lives on its own extra dimension to guarantee non-collinearity. Total grid + free points must not exceed 31.
         #[arg(short = 'f', long, default_value_t = 0)]
         free_points: usize,
 
