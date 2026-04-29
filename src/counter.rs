@@ -32,49 +32,6 @@ pub enum DpEvent {
     LengthDone { length: usize, count: u128 },
 }
 
-/// Progress / streaming event emitted by [`count_patterns_dfs`] during
-/// execution.
-///
-/// IDDFS runs one pass per target length. Each pass counts patterns of exactly
-/// that length independently, so [`DfsEvent::LengthDone`] carries a *final*
-/// value the moment it fires — the caller can print it immediately and it will
-/// never change.
-pub enum DfsEvent {
-    /// Beginning of the pass that counts patterns of exactly `target` nodes.
-    /// Fires once per target length `≥ 2`. Not fired on the unconstrained
-    /// fast path. `pair_total` is the number of top-level `(start, second)`
-    /// pairs that will tick in this pass — use it to size a per-pass bar.
-    PassStart { target: usize, pair_total: u64 },
-    /// One top-level `(start, second)` pair for the current pass has been
-    /// fully explored. Fires `pair_total` times per pass; not fired on the
-    /// unconstrained fast path.
-    PassTick { target: usize, pair_index: u64 },
-    /// `counts[length]` is now final. Fires for every entry of the returned
-    /// vector in strictly ascending order: lengths 0 and 1 fire before any
-    /// `PassStart`; length `k ≥ 2` fires immediately after its pass
-    /// completes.
-    LengthDone { length: usize, count: u128 },
-}
-
-/// Number of [`DfsEvent::PassTick`] events fired during one IDDFS pass.
-///
-/// Equal to `n · (n − 1)`, clamped against overflow. The same count repeats
-/// for every pass target; callers use it to size a per-pass progress bar.
-#[must_use]
-pub const fn dfs_pass_ticks(n: usize) -> u64 {
-    let n = n as u64;
-    n.saturating_mul(n.saturating_sub(1))
-}
-
-/// Which counting algorithm to use.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Algorithm {
-    /// Bottom-up bitmask DP — fast but allocates a `2ⁿ × n × 16`-byte table.
-    Dp,
-    /// Explicit DFS — slow but uses only `O(n)` memory.
-    Dfs,
-}
-
 /// Exact binomial coefficient `C(n, k)`, returned as `u128`.
 ///
 /// The intermediate products in the standard `result = result * (n-i) / (i+1)`
@@ -171,20 +128,6 @@ pub fn dp_table_bytes(n: usize, max_length: usize) -> u64 {
     u64::try_from(total).unwrap_or(u64::MAX)
 }
 
-/// Returns [`Algorithm::Dp`] if [`dp_table_bytes`] for `(n, max_length)` fits
-/// within `memory_budget` bytes, otherwise [`Algorithm::Dfs`].
-///
-/// Callers that want to *force* an algorithm should bypass this helper and
-/// construct the [`Algorithm`] variant directly.
-#[must_use]
-pub fn choose_algorithm(n: usize, max_length: usize, memory_budget: u64) -> Algorithm {
-    if dp_table_bytes(n, max_length) <= memory_budget {
-        Algorithm::Dp
-    } else {
-        Algorithm::Dfs
-    }
-}
-
 /// Returns the exact number of [`DpEvent::Mask`] events
 /// [`count_patterns_dp`] will fire for `(n, max_length)` on a constrained
 /// grid. The unconstrained fast path emits zero `Mask` events regardless.
@@ -211,38 +154,6 @@ pub fn dp_mask_ticks(n: usize, max_length: usize) -> u64 {
         total = total.saturating_add(binomial(n_c, p));
     }
     u64::try_from(total).unwrap_or(u64::MAX)
-}
-
-/// Counts every valid pattern, routing to DP or DFS based on `algorithm`.
-///
-/// The `on_tick` callback is invoked once per outer-loop step: once per
-/// bitmask for DP (up to `2ⁿ − 1` calls) or once per `(start, second)`
-/// top-level pair for DFS (up to `n · (n − 1)` calls). Per-length streaming
-/// is not available through this interface; use [`count_patterns_dp`] or
-/// [`count_patterns_dfs`] directly to observe [`DpEvent::LengthDone`] /
-/// [`DfsEvent::LengthDone`].
-///
-/// # Panics
-/// Panics under the same conditions as the underlying algorithm.
-pub fn count_patterns(
-    n: usize,
-    blocks: &[u32],
-    max_length: usize,
-    algorithm: Algorithm,
-    on_tick: impl Fn(),
-) -> Vec<u128> {
-    match algorithm {
-        Algorithm::Dp => count_patterns_dp(n, blocks, max_length, |event| {
-            if matches!(event, DpEvent::Mask) {
-                on_tick();
-            }
-        }),
-        Algorithm::Dfs => count_patterns_dfs(n, blocks, max_length, |event| {
-            if matches!(event, DfsEvent::PassTick { .. }) {
-                on_tick();
-            }
-        }),
-    }
 }
 
 /// Next bitmask with the same popcount as `x` (Gosper's hack).
@@ -531,167 +442,152 @@ fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
     }
 }
 
-/// Counts every valid pattern via Iterative Deepening DFS with `O(N)` memory.
-///
-/// Runs one pass per target length `L = 2, 3, …, max_length`. Each pass
-/// counts *only* patterns of exactly `L` nodes, so `counts[L]` is final as
-/// soon as that pass ends — emitted immediately via
-/// [`DfsEvent::LengthDone`] — before the next pass begins. The caller can
-/// kill the process after any number of passes and retain exact counts for
-/// every completed length.
-///
-/// `blocks[i * n + j]` must hold the bitmask of nodes that must already be
-/// visited before the move `i → j` is legal (see [`crate::grid::compute_blocks`]).
-///
-/// `max_length` bounds the target lengths: passes run for
-/// `target ∈ 2..=max_length`.
-///
-/// Returns a `Vec<u128>` of length `max_length + 1` where `counts[k]` is the
-/// number of valid patterns of exactly `k` nodes. `counts[0] = 1`.
-///
-/// `u128` is used because for `n ≥ 21` the total count exceeds `u64::MAX`.
-///
-/// # Memory
-/// `O(max_length)` — one `u128` per length slot plus a recursion stack whose
-/// depth never exceeds `max_length`. No exponential table is allocated.
-///
-/// # Panics
-/// Panics if `n > MAX_POINTS`, `blocks.len() != n * n`, or `max_length > n`.
-pub fn count_patterns_dfs<F: FnMut(DfsEvent)>(
-    n: usize,
-    blocks: &[u32],
-    max_length: usize,
-    mut on_event: F,
-) -> Vec<u128> {
-    assert!(
-        n <= MAX_POINTS,
-        "N={n} exceeds the supported maximum of {MAX_POINTS}"
-    );
-    assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
-    assert!(
-        max_length <= n,
-        "max_length={max_length} must not exceed n={n}"
-    );
-
-    if blocks.iter().all(|&b| b == 0) {
-        let counts = count_unconstrained(n, max_length);
-        for (k, &c) in counts.iter().enumerate() {
-            on_event(DfsEvent::LengthDone {
-                length: k,
-                count: c,
-            });
-        }
-        return counts;
-    }
-
-    let mut counts = vec![0u128; max_length + 1];
-    counts[0] = 1;
-    on_event(DfsEvent::LengthDone {
-        length: 0,
-        count: 1,
-    });
-    if n == 0 || max_length == 0 {
-        return counts;
-    }
-    counts[1] = n as u128;
-    on_event(DfsEvent::LengthDone {
-        length: 1,
-        count: n as u128,
-    });
-    if max_length < 2 {
-        return counts;
-    }
-
-    let full_mask: u32 = (1u32 << n) - 1;
-    let pair_total = dfs_pass_ticks(n);
-
-    for (i, count_slot) in counts[2..].iter_mut().enumerate() {
-        let target = i + 2;
-        on_event(DfsEvent::PassStart { target, pair_total });
-        let mut count_target = 0u128;
-        let mut pair_index: u64 = 0;
-        for start in 0..n {
-            let start_bit = 1u32 << start;
-            let row = start * n;
-            for second in 0..n {
-                if second == start {
-                    continue;
-                }
-                let second_bit = 1u32 << second;
-                let blockers = blocks[row + second];
-                if start_bit & blockers == blockers {
-                    if target == 2 {
-                        count_target += 1;
-                    } else {
-                        count_target += iddfs_count(
-                            start_bit | second_bit,
-                            second,
-                            2,
-                            target,
-                            blocks,
-                            n,
-                            full_mask,
-                        );
-                    }
-                }
-                pair_index += 1;
-                on_event(DfsEvent::PassTick { target, pair_index });
-            }
-        }
-        *count_slot = count_target;
-        on_event(DfsEvent::LengthDone {
-            length: target,
-            count: count_target,
-        });
-    }
-
-    counts
-}
-
-/// Counts patterns of exactly `target` nodes that extend the prefix
-/// `(mask, end)` currently at depth `depth`. The recursion short-circuits at
-/// `depth + 1 == target` to avoid any work beyond the target layer.
-fn iddfs_count(
-    mask: u32,
-    end: usize,
-    depth: usize,
-    target: usize,
-    blocks: &[u32],
-    n: usize,
-    full_mask: u32,
-) -> u128 {
-    let mut total = 0u128;
-    let row = end * n;
-    let mut free = !mask & full_mask;
-    while free != 0 {
-        let next_bit = free & free.wrapping_neg();
-        free ^= next_bit;
-        let next = next_bit.trailing_zeros() as usize;
-        let blockers = blocks[row + next];
-        if mask & blockers == blockers {
-            if depth + 1 == target {
-                total += 1;
-            } else {
-                total += iddfs_count(
-                    mask | next_bit,
-                    next,
-                    depth + 1,
-                    target,
-                    blocks,
-                    n,
-                    full_mask,
-                );
-            }
-        }
-    }
-    total
-}
-
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
+    use super::count_unconstrained;
     use super::*;
     use crate::grid::{GridDefinition, build_grid_definition, compute_blocks};
+
+    // IDDFS oracle: cross-checks count_patterns_dp. Doesn't scale past n ≈ 25.
+    enum DfsEvent {
+        PassStart { target: usize, pair_total: u64 },
+        PassTick { target: usize, pair_index: u64 },
+        LengthDone { length: usize, count: u128 },
+    }
+
+    #[must_use]
+    const fn dfs_pass_ticks(n: usize) -> u64 {
+        let n = n as u64;
+        n.saturating_mul(n.saturating_sub(1))
+    }
+
+    fn count_patterns_dfs<F: FnMut(DfsEvent)>(
+        n: usize,
+        blocks: &[u32],
+        max_length: usize,
+        mut on_event: F,
+    ) -> Vec<u128> {
+        assert!(
+            n <= MAX_POINTS,
+            "N={n} exceeds the supported maximum of {MAX_POINTS}"
+        );
+        assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
+        assert!(
+            max_length <= n,
+            "max_length={max_length} must not exceed n={n}"
+        );
+
+        if blocks.iter().all(|&b| b == 0) {
+            let counts = count_unconstrained(n, max_length);
+            for (k, &c) in counts.iter().enumerate() {
+                on_event(DfsEvent::LengthDone {
+                    length: k,
+                    count: c,
+                });
+            }
+            return counts;
+        }
+
+        let mut counts = vec![0u128; max_length + 1];
+        counts[0] = 1;
+        on_event(DfsEvent::LengthDone {
+            length: 0,
+            count: 1,
+        });
+        if n == 0 || max_length == 0 {
+            return counts;
+        }
+        counts[1] = n as u128;
+        on_event(DfsEvent::LengthDone {
+            length: 1,
+            count: n as u128,
+        });
+        if max_length < 2 {
+            return counts;
+        }
+
+        let full_mask: u32 = (1u32 << n) - 1;
+        let pair_total = dfs_pass_ticks(n);
+
+        for (i, count_slot) in counts[2..].iter_mut().enumerate() {
+            let target = i + 2;
+            on_event(DfsEvent::PassStart { target, pair_total });
+            let mut count_target = 0u128;
+            let mut pair_index: u64 = 0;
+            for start in 0..n {
+                let start_bit = 1u32 << start;
+                let row = start * n;
+                for second in 0..n {
+                    if second == start {
+                        continue;
+                    }
+                    let second_bit = 1u32 << second;
+                    let blockers = blocks[row + second];
+                    if start_bit & blockers == blockers {
+                        if target == 2 {
+                            count_target += 1;
+                        } else {
+                            count_target += iddfs_count(
+                                start_bit | second_bit,
+                                second,
+                                2,
+                                target,
+                                blocks,
+                                n,
+                                full_mask,
+                            );
+                        }
+                    }
+                    pair_index += 1;
+                    on_event(DfsEvent::PassTick { target, pair_index });
+                }
+            }
+            *count_slot = count_target;
+            on_event(DfsEvent::LengthDone {
+                length: target,
+                count: count_target,
+            });
+        }
+
+        counts
+    }
+
+    fn iddfs_count(
+        mask: u32,
+        end: usize,
+        depth: usize,
+        target: usize,
+        blocks: &[u32],
+        n: usize,
+        full_mask: u32,
+    ) -> u128 {
+        let mut total = 0u128;
+        let row = end * n;
+        let mut free = !mask & full_mask;
+        while free != 0 {
+            let next_bit = free & free.wrapping_neg();
+            free ^= next_bit;
+            let next = next_bit.trailing_zeros() as usize;
+            let blockers = blocks[row + next];
+            if mask & blockers == blockers {
+                if depth + 1 == target {
+                    total += 1;
+                } else {
+                    total += iddfs_count(
+                        mask | next_bit,
+                        next,
+                        depth + 1,
+                        target,
+                        blocks,
+                        n,
+                        full_mask,
+                    );
+                }
+            }
+        }
+        total
+    }
 
     fn grid(dimensions: usize, points: Vec<Vec<i32>>) -> GridDefinition {
         GridDefinition { dimensions, points }
@@ -1123,21 +1019,6 @@ mod tests {
         assert_eq!(dp_table_bytes(3, 3), 144 + 64);
     }
 
-    // Regression: a previous implementation allocated a `2ⁿ × u32` mask→index
-    // table during the DP regardless of `max_length`. For `n = 28` that table
-    // alone weighed exactly 1 GiB, so `grid 3x3x2 -f 10 --max-length 4`
-    // (n = 28, peak DP layers ≈ 169 KiB) was incorrectly routed to DFS under
-    // the default 1 GiB budget. With the colex-rank rewrite the index table
-    // is gone, and the call must select DP — even with a far tighter budget.
-    #[test]
-    fn choose_algorithm_picks_dp_for_high_n_with_tight_max_length() {
-        let one_gib: u64 = 1024 * 1024 * 1024;
-        assert_eq!(choose_algorithm(28, 4, one_gib), Algorithm::Dp);
-        // 1 MiB still leaves 5+ orders of magnitude of headroom over the
-        // ~169 KiB the DP actually needs.
-        assert_eq!(choose_algorithm(28, 4, 1024 * 1024), Algorithm::Dp);
-    }
-
     // Verifies `colex_rank` is a perfect hash on each popcount class — the
     // contract `process_layer` relies on for write-side indexing into
     // `dp_next`. Sweeps every popcount-`k` mask of an n=12 universe and
@@ -1157,35 +1038,6 @@ mod tests {
                 mask = gosper_next(mask);
                 expected += 1;
             }
-        }
-    }
-
-    #[test]
-    fn choose_algorithm_picks_dp_when_capped_max_length_fits() {
-        // n = 24 with max_length = 24 needs roughly 1 GB.
-        // The mask→index table alone costs 2²⁴·4 B = 64 MiB regardless of
-        // max_length, so the budget must comfortably exceed that for the
-        // capped run to fit. 256 MiB does it.
-        let budget: u64 = 256 * 1024 * 1024;
-        assert_eq!(choose_algorithm(24, 24, budget), Algorithm::Dfs);
-        // …but the same n with a tight max_length cap fits comfortably,
-        // since `dp_next` is never allocated past the cap.
-        assert_eq!(choose_algorithm(24, 4, budget), Algorithm::Dp);
-    }
-
-    #[test]
-    fn choose_algorithm_zero_budget_always_picks_dfs_for_constrained_grids() {
-        // With a zero budget DP can never fit (at minimum it allocates the
-        // counts vector + index table), so the router must fall back to DFS.
-        for n in 1..=8 {
-            assert_eq!(choose_algorithm(n, n, 0), Algorithm::Dfs);
-        }
-    }
-
-    #[test]
-    fn choose_algorithm_huge_budget_always_picks_dp() {
-        for n in 0..=15 {
-            assert_eq!(choose_algorithm(n, n, u64::MAX), Algorithm::Dp);
         }
     }
 
