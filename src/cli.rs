@@ -41,7 +41,9 @@ const STYLES: Styles = Styles::styled()
 use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
-use andlock::counter::{DpEvent, count_patterns_dp, dp_mask_ticks, dp_table_bytes};
+use andlock::counter::{
+    DpEvent, count_patterns_dp, dp_mask_ticks, dp_table_bytes, effective_max_length,
+};
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
 
 #[derive(Parser)]
@@ -76,6 +78,9 @@ enum Command {
         #[command(flatten)]
         range: RangeArgs,
 
+        #[command(flatten)]
+        memory: MemoryArgs,
+
         /// Suppress progress, timing output, and the ASCII grid preview (results still printed to stdout).
         #[arg(short, long)]
         quiet: bool,
@@ -100,10 +105,70 @@ enum Command {
         #[command(flatten)]
         range: RangeArgs,
 
+        #[command(flatten)]
+        memory: MemoryArgs,
+
         /// Suppress progress, timing output, and the ASCII grid preview (results still printed to stdout).
         #[arg(short, long)]
         quiet: bool,
     },
+}
+
+#[derive(Args)]
+struct MemoryArgs {
+    /// Hard ceiling on the DP's peak RAM allocation. Accepts plain bytes ("1024") or values with K/M/G/T suffixes ("512M", "1G", "2GiB"); suffixes use binary units (1 KiB = 1024 B). When the requested run would allocate more, `--max-length` is clamped to the largest length that fits and a warning is printed listing the lengths that were skipped. Without this flag the budget defaults to ~80% of the OS-reported available RAM, sampled once at startup — this prevents large allocations from silently growing into pagefile/swap on systems where the virtual-memory reservation succeeds against committed virtual address space rather than physical RAM.
+    #[arg(
+        long,
+        value_name = "SIZE",
+        value_parser = parse_memory_size,
+    )]
+    memory_limit: Option<u64>,
+}
+
+/// One-shot probe of OS-reported available RAM, scaled down to leave
+/// headroom for the OS and the rest of the process. Used as the implicit
+/// `--memory-limit` when the flag is not passed: `Vec::try_reserve_exact`
+/// only fails when virtual address space is exhausted (which on Windows
+/// includes the pagefile), so we cannot rely on the allocator alone to
+/// keep the run inside physical RAM. No polling — sampled once.
+fn detect_memory_budget() -> u64 {
+    let mut sys = sysinfo::System::new();
+    sys.refresh_memory();
+    // Reserve ~20% as headroom (kernel page cache, other processes, the
+    // rest of this process). The factor is conservative on purpose:
+    // overshooting the budget is the failure mode we are guarding
+    // against.
+    sys.available_memory().saturating_mul(4) / 5
+}
+
+/// Parses `--memory-limit` values like "1024", "512M", "2GiB". Suffixes use
+/// binary units (KiB / MiB / …) and are case-insensitive; a bare number is
+/// interpreted as raw bytes. Used as a `clap` `value_parser`, so the
+/// returned `String` error is rendered into the standard CLI diagnostic.
+fn parse_memory_size(s: &str) -> Result<u64, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("memory size is empty".into());
+    }
+    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
+    let (num_str, suffix) = s.split_at(split);
+    let num: u64 = num_str
+        .parse()
+        .map_err(|_| format!("invalid number in memory size: {s:?}"))?;
+    let multiplier: u64 = match suffix.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "ki" | "kib" => 1024,
+        "m" | "mb" | "mi" | "mib" => 1024u64.pow(2),
+        "g" | "gb" | "gi" | "gib" => 1024u64.pow(3),
+        "t" | "tb" | "ti" | "tib" => 1024u64.pow(4),
+        other => {
+            return Err(format!(
+                "unknown memory size suffix {other:?} (expected one of B, K, M, G, T)"
+            ));
+        }
+    };
+    num.checked_mul(multiplier)
+        .ok_or_else(|| format!("memory size overflows u64: {s:?}"))
 }
 
 #[derive(Args)]
@@ -179,9 +244,39 @@ fn print_length(
     }
 }
 
-fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, quiet: bool) {
+/// Resolves the effective `max_length` cap against the active memory
+/// budget. The budget comes from `--memory-limit` when present, otherwise
+/// from a one-shot probe of OS-reported available RAM (see
+/// [`detect_memory_budget`]).
+///
+/// Returns `(effective, Some((needed_bytes, budget_bytes)))` when the cap
+/// is clamped, or `(max_length, None)` when it fits.
+fn resolve_memory_budget(
+    n: usize,
+    max_length: usize,
+    memory_limit: Option<u64>,
+) -> (usize, Option<(u64, u64)>) {
+    let budget = memory_limit.unwrap_or_else(detect_memory_budget);
+    let effective = effective_max_length(n, max_length, budget);
+    if effective < max_length {
+        let needed = dp_table_bytes(n, max_length);
+        (effective, Some((needed, budget)))
+    } else {
+        (effective, None)
+    }
+}
+
+fn run_pipeline(
+    grid: &GridDefinition,
+    min_length: usize,
+    max_length: usize,
+    memory_limit: Option<u64>,
+    quiet: bool,
+) -> Result<()> {
     let n = grid.points.len();
     let dim = grid.dimensions;
+
+    let (effective, clamp) = resolve_memory_budget(n, max_length, memory_limit);
 
     // Block matrix
     let block_pb = if quiet {
@@ -201,15 +296,15 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     }
 
     // DP uses a single global bar with one tick per popcount-`p` bitmask
-    // visited (`dp_mask_ticks(n, max_length)` total). The bar is suppressed
+    // visited (`dp_mask_ticks(n, effective)` total). The bar is suppressed
     // when no ticks will fire — both for `--quiet` and for trivially small
-    // caps (`max_length < 2`) where the popcount loop never runs and an
+    // caps (`effective < 2`) where the popcount loop never runs and an
     // empty bar would otherwise flash on screen.
-    let dp_ticks = dp_mask_ticks(n, max_length);
+    let dp_ticks = dp_mask_ticks(n, effective);
     let count_pb: Option<ProgressBar> = if quiet || dp_ticks == 0 {
         None
     } else {
-        let mem_est = dp_table_bytes(n, max_length);
+        let mem_est = dp_table_bytes(n, effective);
         let pb = crate::signal::progress().add(ProgressBar::new(dp_ticks));
         pb.set_style(bar_style());
         pb.set_message(format!("{n} points, ~{}", HumanBytes(mem_est)));
@@ -221,7 +316,7 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
     // sees results live. We also keep them in `lines` to size the separator.
     let mut lines: Vec<String> = Vec::new();
     let t1 = Instant::now();
-    let counts = count_patterns_dp(n, &blocks, max_length, |event| match event {
+    let counts = count_patterns_dp(n, &blocks, effective, |event| match event {
         DpEvent::Mask => {
             if let Some(ref pb) = count_pb {
                 pb.inc(1);
@@ -232,31 +327,59 @@ fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, qui
                 length,
                 count,
                 min_length,
-                max_length,
+                effective,
                 count_pb.as_ref(),
                 &mut lines,
             );
         }
-    });
+    })
+    .map_err(|e| {
+        let needed = dp_table_bytes(n, effective);
+        anyhow!(
+            "could not allocate ~{} of RAM for the DP buffers: {e}. Lower --max-length or pass --memory-limit to clamp the run to a smaller cap.",
+            HumanBytes(needed)
+        )
+    })?;
     let elapsed = t1.elapsed();
 
     if let Some(pb) = count_pb {
         pb.finish_and_clear();
     }
 
-    let total: u128 = counts[min_length..=max_length].iter().sum();
-    let total_line = format!("  Total: {total}");
-    let sep_width = lines
-        .iter()
-        .chain(std::iter::once(&total_line))
-        .map(|l| l.chars().count())
-        .max()
-        .unwrap_or(27);
-    println!("{}", "─".repeat(sep_width));
-    println!("{total_line}");
-    if !quiet {
-        eprintln!("  [Finished] Patterns counted in {elapsed:.2?}");
+    // Only print a `Total` line when the run covered the full requested range.
+    // A clamped run omits the total so partial counts stand on their own;
+    // the skip reason and elapsed time appear in the footer on stderr.
+    if effective < max_length {
+        let sep_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(27);
+        println!("{}", "─".repeat(sep_width));
+        if !quiet {
+            if let Some((needed, budget)) = clamp {
+                eprintln!(
+                    "  Lengths {}–{} skipped — need {}, only {} available",
+                    effective + 1,
+                    max_length,
+                    HumanBytes(needed),
+                    HumanBytes(budget),
+                );
+            }
+            eprintln!("  Computed 0–{effective} of 0–{max_length} in {elapsed:.2?}");
+        }
+    } else {
+        let total: u128 = counts[min_length..=effective].iter().sum();
+        let total_line = format!("  Total  {total}");
+        let sep_width = lines
+            .iter()
+            .chain(std::iter::once(&total_line))
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(27);
+        println!("{}", "─".repeat(sep_width));
+        println!("{total_line}");
+        if !quiet {
+            eprintln!("  Counted in {elapsed:.2?}");
+        }
     }
+    Ok(())
 }
 
 /// # Errors
@@ -270,6 +393,7 @@ pub fn run() -> Result<()> {
             free_points,
             export_json,
             range,
+            memory,
             quiet,
         } => {
             let parsed = parse_dims(&dims).map_err(|e| anyhow!("{e}"))?;
@@ -291,13 +415,14 @@ pub fn run() -> Result<()> {
                 println!("{preview}");
                 println!();
             }
-            run_pipeline(&grid, min_length, max_length, quiet);
+            run_pipeline(&grid, min_length, max_length, memory.memory_limit, quiet)?;
         }
         Command::File {
             path,
             export_json,
             simplify,
             range,
+            memory,
             quiet,
         } => {
             let stdin_sentinel = std::path::Path::new("-");
@@ -335,9 +460,41 @@ pub fn run() -> Result<()> {
                 println!("{preview}");
                 println!();
             }
-            run_pipeline(&grid, min_length, max_length, quiet);
+            run_pipeline(&grid, min_length, max_length, memory.memory_limit, quiet)?;
         }
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_memory_size_accepts_plain_bytes() {
+        assert_eq!(parse_memory_size("1024"), Ok(1024));
+        assert_eq!(parse_memory_size("0"), Ok(0));
+        assert_eq!(parse_memory_size("  2048  "), Ok(2048));
+    }
+
+    #[test]
+    fn parse_memory_size_accepts_binary_suffixes() {
+        assert_eq!(parse_memory_size("1K"), Ok(1024));
+        assert_eq!(parse_memory_size("1KiB"), Ok(1024));
+        assert_eq!(parse_memory_size("1kb"), Ok(1024));
+        assert_eq!(parse_memory_size("2M"), Ok(2 * 1024 * 1024));
+        assert_eq!(parse_memory_size("1G"), Ok(1024 * 1024 * 1024));
+        assert_eq!(parse_memory_size("1T"), Ok(1024u64.pow(4)));
+    }
+
+    #[test]
+    fn parse_memory_size_rejects_bad_inputs() {
+        assert!(parse_memory_size("").is_err());
+        assert!(parse_memory_size("abc").is_err());
+        assert!(parse_memory_size("1X").is_err());
+        assert!(parse_memory_size("-1").is_err());
+        // u64 overflow on the multiplier
+        assert!(parse_memory_size("999999999999T").is_err());
+    }
 }
