@@ -38,6 +38,41 @@ const STYLES: Styles = Styles::styled()
     .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
     .placeholder(AnsiColor::Cyan.on_default());
 
+// Examples shown only with `--help` (kept out of `-h` so the brief view stays scannable).
+
+const TOP_EXAMPLES: &str = "\
+Examples:
+  andlock grid 3x3                  Count all patterns on the Android 3x3 grid
+  andlock grid 4x4 --min-length 4   Count Android-style patterns on a 4x4 grid
+  andlock file grid.json            Count patterns on a grid loaded from JSON
+
+Run `andlock <command> --help` for command-specific options.";
+
+const GRID_EXAMPLES: &str = "\
+Examples:
+  andlock grid 3x3
+      Count all patterns on the standard Android 3x3 grid.
+
+  andlock grid 4x4 --min-length 4 --max-length 9
+      Count Android-style patterns (length 4-9) on a 4x4 grid.
+
+  andlock grid 3x3 --free-points 1
+      Add one isolated free point to the 3x3 grid.
+
+  andlock grid 3x3 --export-json > grid.json
+      Save the grid to JSON for reuse with `andlock file`.";
+
+const FILE_EXAMPLES: &str = "\
+Examples:
+  andlock file grid.json
+      Count patterns on a grid loaded from a file.
+
+  andlock grid 3x3 --export-json | andlock file -
+      Pipe a generated grid through stdin.
+
+  andlock file grid.json --simplify --export-json
+      Print the canonical form of a grid.";
+
 use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
@@ -46,11 +81,16 @@ use andlock::counter::{
 };
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
 
+/// Count Android-style unlock patterns on n-dimensional grids.
+///
+/// Use `andlock grid` to generate a rectangular grid on the fly, or
+/// `andlock file` to load one from JSON. The empty (length-0) pattern
+/// is included in the count unless --min-length excludes it.
 #[derive(Parser)]
 #[command(
     name = "andlock",
     version,
-    about = "Count Android-style unlock patterns on n-dimensional nodes",
+    after_long_help = TOP_EXAMPLES,
     styles = STYLES
 )]
 struct Cli {
@@ -60,19 +100,31 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Generate a rectangular grid on the fly and count its patterns.
-    /// Length 0 (the empty/null pattern) is counted as a valid pattern unless `--min-length` excludes it.
-    /// An ASCII preview is rendered for 1D/2D grids that fit ~40×20 cells; larger or 3D+ grids skip the preview (use `--export-json` to inspect coordinates).
+    /// Count patterns on a generated rectangular grid.
+    ///
+    /// Builds the grid in memory from <DIMS>, runs the counter, and prints
+    /// the count for each pattern length. 1D and 2D grids that fit ~40x20
+    /// cells get an ASCII preview; larger or 3D+ grids skip it. Use
+    /// --export-json to dump the grid for reuse with `andlock file`.
+    #[command(after_long_help = GRID_EXAMPLES)]
     Grid {
-        /// Axis sizes separated by 'x' or 'X', with no surrounding whitespace (e.g. "3x3", "10", "2X3x2"). Each component must be a non-negative integer.
+        /// Axis sizes joined by 'x' (e.g. "3x3", "10", "2X3x2").
+        ///
+        /// Each component is a non-negative integer; no surrounding whitespace.
         dims: String,
 
-        /// Append N extra isolated points not collinear with any grid pair (e.g. "3x3 -f 1" adds one free point to the standard 3×3 grid). Each free point lives on its own extra dimension to guarantee non-collinearity. Total grid + free points must not exceed 31.
-        #[arg(short = 'f', long, default_value_t = 0)]
+        /// Add N isolated points not collinear with any grid pair.
+        ///
+        /// Each free point lives on its own extra dimension to guarantee
+        /// non-collinearity. Total grid + free points must not exceed 31.
+        #[arg(short = 'f', long, default_value_t = 0, value_name = "N")]
         free_points: usize,
 
-        /// Emit the generated `GridDefinition` as pretty JSON to stdout instead of counting patterns (use `> file.json` to save). Generated grids are always emitted in canonical form.
-        #[arg(long)]
+        /// Print the grid as JSON instead of counting.
+        ///
+        /// Generated grids are emitted in canonical form. Redirect with
+        /// `> grid.json` to save.
+        #[arg(long, help_heading = "Output")]
         export_json: bool,
 
         #[command(flatten)]
@@ -81,25 +133,33 @@ enum Command {
         #[command(flatten)]
         memory: MemoryArgs,
 
-        /// Suppress progress, timing output, and the ASCII grid preview (results still printed to stdout).
-        #[arg(short, long)]
+        /// Suppress progress, timing, and the grid preview.
+        ///
+        /// Pattern counts are still printed to stdout.
+        #[arg(short, long, help_heading = "Output")]
         quiet: bool,
     },
-    /// Load a `GridDefinition` from a JSON file and count its patterns (0–31 points).
-    /// Length 0 (the empty/null pattern) is counted as a valid pattern unless `--min-length` excludes it.
-    /// An ASCII preview is rendered for 1D/2D grids that fit ~40×20 cells; larger or 3D+ grids skip the preview.
-    /// Pass `-` as the path to read from stdin, enabling pipelines like:
-    ///   andlock grid "3x3" --export-json | andlock file -
+    /// Count patterns on a grid loaded from JSON.
+    ///
+    /// Loads a `GridDefinition` (0-31 points) from <PATH> and counts its
+    /// patterns. 1D and 2D grids that fit ~40x20 cells get an ASCII preview.
+    /// Pass `-` as <PATH> to read from stdin.
+    #[command(after_long_help = FILE_EXAMPLES)]
     File {
-        /// Path to a JSON file containing a `GridDefinition`, or `-` to read from stdin.
+        /// Path to a JSON `GridDefinition`, or `-` to read from stdin.
         path: PathBuf,
 
-        /// Re-emit the loaded `GridDefinition` as pretty-printed JSON to stdout instead of counting patterns.
-        #[arg(long)]
+        /// Print the loaded grid as JSON instead of counting.
+        ///
+        /// Re-emits the grid pretty-printed; combine with --simplify to
+        /// canonicalize first.
+        #[arg(long, help_heading = "Output")]
         export_json: bool,
 
-        /// Apply canonical-form simplification passes (translate to origin, compress axes) before exporting JSON. Only valid with `--export-json`.
-        #[arg(long, requires = "export_json")]
+        /// Canonicalize the grid before exporting (requires --export-json).
+        ///
+        /// Translates the grid to the origin and compresses unused axes.
+        #[arg(long, requires = "export_json", help_heading = "Output")]
         simplify: bool,
 
         #[command(flatten)]
@@ -108,19 +168,31 @@ enum Command {
         #[command(flatten)]
         memory: MemoryArgs,
 
-        /// Suppress progress, timing output, and the ASCII grid preview (results still printed to stdout).
-        #[arg(short, long)]
+        /// Suppress progress, timing, and the grid preview.
+        ///
+        /// Pattern counts are still printed to stdout.
+        #[arg(short, long, help_heading = "Output")]
         quiet: bool,
     },
 }
 
 #[derive(Args)]
 struct MemoryArgs {
-    /// Hard ceiling on the DP's peak RAM allocation. Accepts plain bytes ("1024") or values with K/M/G/T suffixes ("512M", "1G", "2GiB"); suffixes use binary units (1 KiB = 1024 B). When the requested run would allocate more, `--max-length` is clamped to the largest length that fits and a warning is printed listing the lengths that were skipped. Without this flag the budget defaults to ~80% of the OS-reported available RAM, sampled once at startup — this prevents large allocations from silently growing into pagefile/swap on systems where the virtual-memory reservation succeeds against committed virtual address space rather than physical RAM.
+    /// Cap peak RAM allocation (e.g. 512M, 2GiB).
+    ///
+    /// Accepts plain bytes ("1024") or values with K/M/G/T suffixes (binary
+    /// units; 1 KiB = 1024 B). When the run would allocate more, --max-length
+    /// is clamped to the largest length that fits and a warning lists the
+    /// skipped lengths.
+    ///
+    /// Defaults to ~80% of the OS-reported available RAM, sampled once at
+    /// startup. The default guards against the DP silently growing into
+    /// pagefile/swap.
     #[arg(
         long,
         value_name = "SIZE",
         value_parser = parse_memory_size,
+        help_heading = "Resources",
     )]
     memory_limit: Option<u64>,
 }
@@ -173,12 +245,18 @@ fn parse_memory_size(s: &str) -> Result<u64, String> {
 
 #[derive(Args)]
 struct RangeArgs {
-    /// Only include patterns with at least N points (e.g. `--min-length 4` matches Android's lock screen minimum). Defaults to 0, i.e. the empty pattern is shown.
-    #[arg(long, value_name = "N")]
+    /// Skip patterns shorter than N points.
+    ///
+    /// Defaults to 0 (the empty pattern is included). Use --min-length 4
+    /// to match Android's lock-screen minimum.
+    #[arg(long, value_name = "N", help_heading = "Pattern length")]
     min_length: Option<usize>,
 
-    /// Only include patterns with at most N points. The algorithm prunes longer prefixes, so a tight cap exponentially reduces runtime. Defaults to the total point count.
-    #[arg(long, value_name = "N")]
+    /// Skip patterns longer than N points.
+    ///
+    /// Defaults to the total point count. A tighter cap reduces runtime
+    /// because the counter prunes longer prefixes.
+    #[arg(long, value_name = "N", help_heading = "Pattern length")]
     max_length: Option<usize>,
 }
 
