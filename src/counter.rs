@@ -167,8 +167,8 @@ const fn gosper_next(x: u32) -> u32 {
 }
 
 /// Pascal's triangle, indexed `[n][k] = C(n, k)`. Sized to cover every
-/// `n ≤ MAX_POINTS` (= 31) plus a small margin for off-by-one indexing
-/// inside [`colex_rank`]. `C(32, 16) ≈ 6.0 × 10⁸` fits in `u32`.
+/// `n ≤ MAX_POINTS` (= 31) plus a margin for the highest index reached in
+/// [`process_layer`]. `C(32, 16) ≈ 6.0 × 10⁸` fits in `u32`.
 const BINOM: [[u32; 33]; 33] = {
     let mut t = [[0u32; 33]; 33];
     let mut i = 0;
@@ -183,29 +183,6 @@ const BINOM: [[u32; 33]; 33] = {
     }
     t
 };
-
-/// Colex rank of a bitmask of popcount `k`: a perfect hash into
-/// `[0, C(n, k))` where bit positions `a_1 < … < a_k` map to
-/// `Σ C(a_i, i)`.
-///
-/// Replaces the `2ⁿ × u32` mask→index lookup table the layered DP used to
-/// allocate. Crucially, Gosper enumeration walks popcount-`k` masks in
-/// numeric ascending order — which equals colex-rank order for fixed
-/// popcount — so the source layer can still be read with an incrementing
-/// counter; only writes into the destination layer need an explicit rank.
-#[inline]
-const fn colex_rank(mut mask: u32) -> u32 {
-    let mut rank: u32 = 0;
-    let mut k: usize = 1;
-    while mask != 0 {
-        let bit = mask & mask.wrapping_neg();
-        let pos = bit.trailing_zeros() as usize;
-        rank += BINOM[pos][k];
-        mask ^= bit;
-        k += 1;
-    }
-    rank
-}
 
 /// Computes pattern counts when there are no visibility constraints.
 ///
@@ -244,12 +221,13 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 /// Two adjacent popcount layers are alive at any time: the source layer
 /// (popcount `p`, read) and the destination (popcount `p+1`, written).
 /// Each mask of popcount `p` packs only `p` `u128` slots — one per valid
-/// endpoint. Layer-local indices are computed via [`colex_rank`] instead
+/// endpoint. Layer-local indices are computed via a colex-rank formula instead
 /// of stored in a `2ⁿ × u32` lookup table, which keeps the working set
 /// proportional to the actual popcount layers rather than `2ⁿ`. The source
 /// layer is read with an incrementing counter that mirrors Gosper order
-/// (= colex order for fixed popcount); only writes into the destination
-/// layer pay the O(p) rank computation. See [`dp_table_bytes`].
+/// (= colex order for fixed popcount); writes into the destination layer
+/// use precomputed prefix/suffix sums to reconstruct the rank in O(1).
+/// See [`dp_table_bytes`].
 ///
 /// # Complexity
 /// With `L = max_length`, extension work is bounded by the prefixes of length
@@ -305,8 +283,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
     //
     // Source-layer indices are an incrementing counter (Gosper order ==
     // colex order for fixed popcount); destination-layer indices are
-    // computed on the fly via `colex_rank`, so no `2ⁿ` lookup table is
-    // allocated.
+    // computed via prefix/suffix sums, so no `2ⁿ` lookup table is allocated.
     let mut dp_curr: Vec<u128> = vec![1u128; n];
     counts[1] = n as u128;
     on_event(DpEvent::LengthDone {
@@ -397,39 +374,65 @@ fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
     } = ctx;
 
     let next_p = p + 1;
+    // prefix/suffix sums reconstruct colex_rank(mask | next_bit) in O(1) per extension
+    let mut prefix_sum: [u32; 33] = [0; 33];
+    let mut suffix_sum: [u32; 33] = [0; 33];
+    let mut bit_pos: [u32; 32] = [0; 32];
+
     let mut idx_curr: u32 = 0;
     let mut mask: u32 = (1u32 << p) - 1;
     let last: u32 = mask << (n - p);
     loop {
         on_event(DpEvent::Mask);
         let base_curr = (idx_curr as usize) * p;
+
+        if need_dp_next {
+            let mut tmp = mask;
+            let mut i = 0usize;
+            while tmp != 0 {
+                let bit = tmp & tmp.wrapping_neg();
+                let pos = bit.trailing_zeros();
+                bit_pos[i] = pos;
+                prefix_sum[i + 1] = prefix_sum[i] + BINOM[pos as usize][i + 1];
+                tmp ^= bit;
+                i += 1;
+            }
+            suffix_sum[p] = 0;
+            for j in (0..p).rev() {
+                suffix_sum[j] = suffix_sum[j + 1] + BINOM[bit_pos[j] as usize][j + 2];
+            }
+        }
+
+        let mut end_off: usize = 0;
         let mut visited = mask;
         while visited != 0 {
             let end_bit = visited & visited.wrapping_neg();
             visited ^= end_bit;
             let end = end_bit.trailing_zeros() as usize;
-            let end_off = (mask & (end_bit - 1)).count_ones() as usize;
             let ways = dp_curr[base_curr + end_off];
+            end_off += 1;
             if ways == 0 {
                 continue;
             }
 
+            let row_start = end * n;
             let mut free = !mask & full_mask;
             while free != 0 {
                 let next_bit = free & free.wrapping_neg();
                 free ^= next_bit;
                 let next = next_bit.trailing_zeros() as usize;
 
-                let blockers = blocks[end * n + next];
+                let blockers = blocks[row_start + next];
                 if mask & blockers == blockers {
                     counts[next_p] += ways;
                     if need_dp_next {
-                        let idx_new = colex_rank(mask | next_bit) as usize;
                         // `next_bit` is not in `mask`, so the set bits of
                         // (mask | next_bit) below `next_bit` are exactly
                         // the bits of `mask` below it.
                         let next_off = (mask & (next_bit - 1)).count_ones() as usize;
-                        dp_next[idx_new * next_p + next_off] += ways;
+                        let idx_new =
+                            prefix_sum[next_off] + BINOM[next][next_off + 1] + suffix_sum[next_off];
+                        dp_next[idx_new as usize * next_p + next_off] += ways;
                     }
                 }
             }
@@ -448,6 +451,22 @@ mod tests {
     use super::count_unconstrained;
     use super::*;
     use crate::grid::{GridDefinition, build_grid_definition, compute_blocks};
+
+    /// Colex rank of a bitmask of popcount `k`: a perfect hash into
+    /// `[0, C(n, k))` where bit positions `a_1 < … < a_k` map to
+    /// `Σ C(a_i, i)`.
+    const fn colex_rank(mut mask: u32) -> u32 {
+        let mut rank: u32 = 0;
+        let mut k: usize = 1;
+        while mask != 0 {
+            let bit = mask & mask.wrapping_neg();
+            let pos = bit.trailing_zeros() as usize;
+            rank += BINOM[pos][k];
+            mask ^= bit;
+            k += 1;
+        }
+        rank
+    }
 
     // IDDFS oracle: cross-checks count_patterns_dp. Doesn't scale past n ≈ 25.
     fn count_patterns_dfs(n: usize, blocks: &[u32], max_length: usize) -> Vec<u128> {
@@ -832,7 +851,7 @@ mod tests {
 
     #[test]
     fn dp_table_bytes_handles_max_supported_n_without_overflow() {
-        // n = 31, full run: peak DP layer pair plus the 2³¹ · 4 B index table.
+        // n = 31, full run: peak DP layer pair dominates at this scale.
         // Must not saturate to u64::MAX — we only need a finite, sensible bound.
         let bytes = dp_table_bytes(31, 31);
         assert!(bytes < u64::MAX);
@@ -843,7 +862,7 @@ mod tests {
     //   p=1: dp_curr always = n = 3 entries (init).
     //   p>=2: dp_curr = C(n,p)·p iff p < l, dp_next = C(n,p+1)·(p+1) iff p+1 < l.
     //   counts = (l+1)·16 B. No mask→index lookup table — destination
-    //   indices come from `colex_rank`.
+    //   indices come from prefix/suffix sums.
     #[test]
     fn dp_table_bytes_n3_known_values() {
         // max_length = 0 → early exit, counts only (1·16 = 16 B).
