@@ -225,7 +225,7 @@ mod tests {
         g.validate().unwrap();
         let blocks = compute_blocks(g);
         let n = g.points.len();
-        count_patterns_dp(n, &blocks, n, |_| {})
+        count_patterns_dp(n, &blocks, n, |_| {}).unwrap()
     }
 
     /// 3×3 grid translated by (10, 20) and scaled by 3 on both axes.

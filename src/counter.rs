@@ -50,17 +50,20 @@ fn binomial(n: usize, k: usize) -> u128 {
     result
 }
 
-/// Returns the peak number of bytes [`count_patterns_dp`] would allocate for
-/// `n` nodes when called with `max_length`.
+/// Returns the exact number of bytes [`count_patterns_dp`] allocates up
+/// front for `n` nodes when called with `max_length`.
 ///
-/// The layered DP holds at most two adjacent popcount layers — popcount `p`
-/// (read source) and popcount `p+1` (write destination). Each mask of
-/// popcount `p` stores only `p` `u128` slots (one per valid endpoint), and
-/// the layer-local index of a destination mask is computed on the fly as
-/// its colex rank (a perfect hash into `[0, C(n, p+1))`), so no `2ⁿ`
-/// auxiliary table is allocated. A destination layer for popcount `p+1` is
-/// only allocated while `p+1 < max_length`; once the cap is reached the
-/// source layer is consumed but no further layer is built.
+/// The layered DP keeps two ping-pong `Vec<u128>` buffers, each sized to the
+/// largest single popcount layer it will ever hold. Layer `p` packs
+/// `C(n, p)·p` `u128` slots — one per valid endpoint — with layer 1 always
+/// equal to `n = C(n, 1)·1`. The peak entry count is therefore
+/// `M = max_{p ∈ 1..max_length} C(n, p)·p` and the DP allocation is `2·M`
+/// `u128` entries (= `32·M` bytes) on top of the `(max_length+1)·16`-byte
+/// `counts` vector. The buffers are allocated once and reused via
+/// [`std::mem::swap`]; there is no per-iteration allocation.
+///
+/// When `max_length < 2` the DP body exits before allocating any layer
+/// buffer, so the result is just the `counts` vector (16 bytes per slot).
 ///
 /// `max_length` is clamped to `n`; values above that are equivalent to `n`
 /// (passing `max_length > n` to [`count_patterns_dp`] itself panics, so the
@@ -74,58 +77,67 @@ pub fn dp_table_bytes(n: usize, max_length: usize) -> u64 {
     // counts vector: max_length+1 u128 slots, always allocated.
     let counts_bytes: u128 = (max_length as u128).saturating_add(1).saturating_mul(16);
 
-    // Early exit in the DP body: when n == 0 or max_length == 0 the function
-    // returns before allocating any DP layer.
-    if n == 0 || max_length == 0 {
+    // No DP buffers when the algorithm exits before iterating popcount
+    // layers (n == 0, max_length == 0, or max_length == 1 — the latter
+    // hard-codes counts[1] = n without touching any DP layer).
+    if n == 0 || max_length < 2 {
         return u64::try_from(counts_bytes).unwrap_or(u64::MAX);
     }
 
     let n_c = n.min(63);
     let l = max_length.min(n_c);
 
-    // Peak DP layer pair, in u128 entries (×16 bytes at the end).
-    //
-    // Layer 1 (`dp_curr` initial) is unconditionally allocated to `n` entries.
-    // For iteration `p`:
-    //   * `dp_curr` holds the popcount-`p` layer — non-empty only when it was
-    //     written as a destination by the previous iteration, i.e. `p < l`
-    //     (or always for `p == 1`, hard-coded by the initialisation).
-    //   * `dp_next` holds the popcount-`p+1` layer — allocated only while
-    //     `p + 1 < l`.
-    let mut peak_pair_entries: u128 = n_c as u128;
-
-    // p == 1 (special-cased: dp_curr is always sized n).
-    let dp_next_p1 = if 2 < l {
-        binomial(n_c, 2).saturating_mul(2)
-    } else {
-        0
-    };
-    let pair_p1 = (n_c as u128).saturating_add(dp_next_p1);
-    if pair_p1 > peak_pair_entries {
-        peak_pair_entries = pair_p1;
-    }
-
-    // p >= 2.
-    for p in 2..=n_c {
-        let dp_curr = if p < l {
-            binomial(n_c, p).saturating_mul(p as u128)
-        } else {
-            0
-        };
-        let dp_next = if p + 1 < l {
-            binomial(n_c, p + 1).saturating_mul((p + 1) as u128)
-        } else {
-            0
-        };
-        let pair = dp_curr.saturating_add(dp_next);
-        if pair > peak_pair_entries {
-            peak_pair_entries = pair;
+    // Peak single popcount layer, in u128 entries. Layer p has C(n, p)·p
+    // entries; the loop bound `1..l` covers every layer the DP visits as
+    // either source or destination.
+    let mut peak_layer_entries: u128 = 0;
+    for p in 1..l {
+        let entries = binomial(n_c, p).saturating_mul(p as u128);
+        if entries > peak_layer_entries {
+            peak_layer_entries = entries;
         }
     }
 
-    let dp_bytes = peak_pair_entries.saturating_mul(16);
+    let dp_bytes = peak_layer_entries.saturating_mul(2).saturating_mul(16);
     let total = dp_bytes.saturating_add(counts_bytes);
     u64::try_from(total).unwrap_or(u64::MAX)
+}
+
+/// Returns the largest `max_length ≤ requested` whose peak allocation
+/// (per [`dp_table_bytes`]) fits within `budget_bytes`.
+///
+/// `dp_table_bytes` is monotone non-decreasing in `max_length`, so the
+/// search walks `requested..=0` and returns the first value that fits.
+/// Always returns at most `requested.min(n)`. Returns `0` when even
+/// `max_length = 1` does not fit; the resulting run still produces the
+/// trivial `counts[0] = 1` and the caller can present that as a partial
+/// result rather than aborting.
+#[must_use]
+pub fn effective_max_length(n: usize, requested: usize, budget_bytes: u64) -> usize {
+    let cap = requested.min(n);
+    for l in (1..=cap).rev() {
+        if dp_table_bytes(n, l) <= budget_bytes {
+            return l;
+        }
+    }
+    0
+}
+
+/// Computes the per-buffer entry count `M` for the ping-pong DP buffers at
+/// `max_length = l`, namely `max_{p ∈ 1..l} C(n, p)·p`. Returns 0 when
+/// `l < 2` (no DP buffer is needed in that case).
+fn dp_layer_capacity(n: usize, l: usize) -> usize {
+    if l < 2 {
+        return 0;
+    }
+    let mut m: usize = n;
+    for p in 2..l {
+        let entries = (binomial(n, p) as usize).saturating_mul(p);
+        if entries > m {
+            m = entries;
+        }
+    }
+    m
 }
 
 /// Returns the exact number of [`DpEvent::Mask`] events
@@ -219,15 +231,26 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 ///
 /// # Memory
 /// Two adjacent popcount layers are alive at any time: the source layer
-/// (popcount `p`, read) and the destination (popcount `p+1`, written).
-/// Each mask of popcount `p` packs only `p` `u128` slots — one per valid
-/// endpoint. Layer-local indices are computed via a colex-rank formula instead
-/// of stored in a `2ⁿ × u32` lookup table, which keeps the working set
-/// proportional to the actual popcount layers rather than `2ⁿ`. The source
-/// layer is read with an incrementing counter that mirrors Gosper order
-/// (= colex order for fixed popcount); writes into the destination layer
-/// use precomputed prefix/suffix sums to reconstruct the rank in O(1).
-/// See [`dp_table_bytes`].
+/// (popcount `p`, read) and the destination (popcount `p+1`, written). Both
+/// live in pre-allocated ping-pong `Vec<u128>` buffers sized to the largest
+/// popcount layer this run will ever hold, swapped in place between
+/// iterations — no per-iteration allocation occurs. Each mask of popcount
+/// `p` packs only `p` `u128` slots (one per valid endpoint). Layer-local
+/// indices are computed via a colex-rank formula instead of stored in a
+/// `2ⁿ × u32` lookup table, which keeps the working set proportional to
+/// the actual popcount layers rather than `2ⁿ`. The source layer is read
+/// with an incrementing counter that mirrors Gosper order (= colex order
+/// for fixed popcount); writes into the destination layer use precomputed
+/// prefix/suffix sums to reconstruct the rank in O(1). See
+/// [`dp_table_bytes`] for the exact byte count and
+/// [`effective_max_length`] for clamping a requested cap to a memory
+/// budget.
+///
+/// # Errors
+/// Returns `Err(TryReserveError)` when [`Vec::try_reserve_exact`] cannot
+/// reserve the two ping-pong DP buffers (each `dp_layer_capacity(n,
+/// max_length)` `u128` slots). Callers should surface the error to the
+/// user and let them lower `--max-length` or set `--memory-limit`.
 ///
 /// # Complexity
 /// With `L = max_length`, extension work is bounded by the prefixes of length
@@ -242,7 +265,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
     blocks: &[u32],
     max_length: usize,
     mut on_event: F,
-) -> Vec<u128> {
+) -> Result<Vec<u128>, std::collections::TryReserveError> {
     assert!(n <= MAX_POINTS, "N={n} exceeds the maximum of {MAX_POINTS}");
     assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
     assert!(
@@ -258,7 +281,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
                 count: c,
             });
         }
-        return counts;
+        return Ok(counts);
     }
 
     let mut counts = vec![0u128; max_length + 1];
@@ -268,28 +291,52 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
         count: 1,
     });
     if max_length == 0 {
-        return counts;
+        return Ok(counts);
     }
 
-    let full_mask: u32 = (1u32 << n) - 1;
-
-    // dp_curr stores the current popcount layer in mask-major layout, packing
-    // only the `p` valid endpoints per popcount-`p` mask. The endpoint offset
-    // within a mask is the popcount of (mask & (bit−1)) — a single hardware
-    // instruction. Layer 1 has `n` masks each with one slot.
-    //
-    // Per-state values can reach (len-1)! at the full mask, which exceeds
-    // u64::MAX starting around n=22 — hence u128 (same rationale as `counts`).
-    //
-    // Source-layer indices are an incrementing counter (Gosper order ==
-    // colex order for fixed popcount); destination-layer indices are
-    // computed via prefix/suffix sums, so no `2ⁿ` lookup table is allocated.
-    let mut dp_curr: Vec<u128> = vec![1u128; n];
     counts[1] = n as u128;
     on_event(DpEvent::LengthDone {
         length: 1,
         count: counts[1],
     });
+    if max_length < 2 {
+        return Ok(counts);
+    }
+
+    // Reserve both ping-pong buffers up front at the exact capacity the
+    // run will need. Any allocation failure is surfaced to the caller —
+    // we never silently scale the run down, so the user always sees the
+    // counts they asked for or a clear error.
+    let m = dp_layer_capacity(n, max_length);
+    let mut dp_curr: Vec<u128> = Vec::new();
+    dp_curr.try_reserve_exact(m)?;
+    dp_curr.resize(m, 0);
+    let mut dp_next: Vec<u128> = Vec::new();
+    dp_next.try_reserve_exact(m)?;
+    dp_next.resize(m, 0);
+
+    let full_mask: u32 = (1u32 << n) - 1;
+
+    // The two buffers were sized to the largest popcount layer this run
+    // will ever hold (see [`dp_layer_capacity`]). They are pre-allocated
+    // and reused via [`std::mem::swap`]; no per-iteration allocation
+    // occurs.
+    //
+    // Per-state values can reach (len-1)! at the full mask, which exceeds
+    // u64::MAX starting around n=22 — hence u128 (same rationale as `counts`).
+    //
+    // Layout: each popcount-`p` mask packs only its `p` valid endpoints in
+    // mask-major order. The endpoint offset within a mask is the popcount of
+    // (mask & (bit−1)) — a single hardware instruction. Source-layer
+    // indices are an incrementing counter (Gosper order == colex order for
+    // fixed popcount); destination-layer indices are computed via
+    // prefix/suffix sums, so no `2ⁿ` lookup table is allocated.
+
+    // Initialise the popcount-1 layer in dp_curr: each of the n masks has
+    // exactly one valid endpoint and one way to reach it.
+    for slot in &mut dp_curr[..n] {
+        *slot = 1;
+    }
 
     // Enumerate popcount classes ascending so every proper subset of a
     // popcount-`p` mask is already final by the time we read it. Streaming
@@ -299,16 +346,24 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
     // and no caller-visible state is produced at higher popcounts.
     for p in 1..max_length {
         let next_p = p + 1;
-        // dp_next is only allocated when a future iteration will read from
-        // it (`next_p < max_length`). At `next_p == max_length` we still
-        // accumulate `counts[max_length]` from the source layer but skip
-        // the dp_next writes — they would never be read.
+        // We still accumulate `counts[max_length]` from the source layer
+        // at p == max_length - 1, but skip the dp_next writes — they
+        // would never be read.
         let need_dp_next = next_p < max_length;
-        let mut dp_next: Vec<u128> = if need_dp_next {
-            vec![0u128; binomial(n, next_p) as usize * next_p]
+        let next_len = if need_dp_next {
+            binomial(n, next_p) as usize * next_p
         } else {
-            Vec::new()
+            0
         };
+
+        // Zero only the destination prefix that will be written. The rest
+        // of the buffer carries stale data from earlier iterations but is
+        // never indexed.
+        if need_dp_next {
+            for slot in &mut dp_next[..next_len] {
+                *slot = 0;
+            }
+        }
 
         process_layer(LayerCtx {
             n,
@@ -317,7 +372,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
             p,
             need_dp_next,
             dp_curr: &dp_curr,
-            dp_next: &mut dp_next,
+            dp_next: &mut dp_next[..next_len],
             counts: &mut counts,
             on_event: &mut on_event,
         });
@@ -329,13 +384,13 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
             count: counts[next_p],
         });
 
-        // Hand the destination layer to the next iteration. When
-        // `need_dp_next` was false, `dp_next` is empty — `dp_curr` becomes
-        // empty too, releasing the previous layer's allocation early.
-        dp_curr = dp_next;
+        // Swap roles for the next iteration: today's destination becomes
+        // tomorrow's source. The buffers themselves are reused, no
+        // reallocation occurs.
+        std::mem::swap(&mut dp_curr, &mut dp_next);
     }
 
-    counts
+    Ok(counts)
 }
 
 /// Bundle of state passed into [`process_layer`].
@@ -575,7 +630,7 @@ mod tests {
     // Every test that checks output values goes through this helper so that
     // both algorithms are verified in a single pass.
     fn count(n: usize, blocks: &[u32], max_length: usize) -> Vec<u128> {
-        let dp = count_patterns_dp(n, blocks, max_length, |_| {});
+        let dp = count_patterns_dp(n, blocks, max_length, |_| {}).unwrap();
         let dfs = count_patterns_dfs(n, blocks, max_length);
         assert_eq!(
             dp, dfs,
@@ -693,7 +748,7 @@ mod tests {
         let blocks = compute_blocks(&g);
         let n = g.points.len();
         assert_eq!(n, 21);
-        let counts = count_patterns_dp(n, &blocks, n, |_| {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {}).unwrap();
         for k in 1..=n {
             assert!(
                 counts[k] >= counts[k - 1],
@@ -721,7 +776,7 @@ mod tests {
         let blocks = compute_blocks(&g);
         let n = g.points.len();
         assert_eq!(n, 24);
-        let counts = count_patterns_dp(n, &blocks, n, |_| {});
+        let counts = count_patterns_dp(n, &blocks, n, |_| {}).unwrap();
         for k in 1..=n {
             assert!(
                 counts[k] >= counts[k - 1],
@@ -859,22 +914,81 @@ mod tests {
     }
 
     // Hand-verified expected sizes for n = 3 across every max_length.
-    //   p=1: dp_curr always = n = 3 entries (init).
-    //   p>=2: dp_curr = C(n,p)·p iff p < l, dp_next = C(n,p+1)·(p+1) iff p+1 < l.
-    //   counts = (l+1)·16 B. No mask→index lookup table — destination
-    //   indices come from prefix/suffix sums.
+    //   max_length < 2: no DP buffer is allocated; only counts (16 B per slot).
+    //   max_length >= 2: two ping-pong buffers of size M = max_{p in 1..L} C(n,p)·p
+    //     u128 entries, plus counts of (L+1)·16 B.
+    //     M(L=2) = C(3,1)·1 = 3
+    //     M(L=3) = max(3, C(3,2)·2) = 6
     #[test]
     fn dp_table_bytes_n3_known_values() {
         // max_length = 0 → early exit, counts only (1·16 = 16 B).
         assert_eq!(dp_table_bytes(3, 0), 16);
-        // max_length = 1 → peak = 3 entries (48 B) + counts 32 B.
-        assert_eq!(dp_table_bytes(3, 1), 48 + 32);
-        // max_length = 2 → same peak = 3 entries (no dp_next allocated).
-        //   counts = 3·16 = 48 B.
-        assert_eq!(dp_table_bytes(3, 2), 48 + 48);
-        // max_length = 3 → peak at p=1 = 3 + C(3,2)·2 = 3 + 6 = 9 entries (144 B).
-        //   counts = 4·16 = 64 B.
-        assert_eq!(dp_table_bytes(3, 3), 144 + 64);
+        // max_length = 1 → early exit (no DP layer iterated), counts = 2·16 = 32 B.
+        assert_eq!(dp_table_bytes(3, 1), 32);
+        // max_length = 2 → 2·M·16 + counts = 2·3·16 + 3·16 = 96 + 48 = 144 B.
+        assert_eq!(dp_table_bytes(3, 2), 96 + 48);
+        // max_length = 3 → 2·M·16 + counts = 2·6·16 + 4·16 = 192 + 64 = 256 B.
+        assert_eq!(dp_table_bytes(3, 3), 192 + 64);
+    }
+
+    // effective_max_length must be monotone in budget and never exceed
+    // requested.min(n). Cross-check by evaluating dp_table_bytes at the
+    // returned cap and the next length up.
+    #[test]
+    fn effective_max_length_respects_budget_monotonically() {
+        for n in 1..=8 {
+            let mut prev: usize = 0;
+            // Sweep budgets in 1 KiB steps from 0 up to the full-run cost.
+            let full_bytes = dp_table_bytes(n, n);
+            let step: u64 = (full_bytes / 16).max(1024);
+            let mut budget: u64 = 0;
+            loop {
+                let eff = effective_max_length(n, n, budget);
+                assert!(eff <= n, "n={n}, budget={budget}: eff={eff} exceeds n");
+                assert!(
+                    eff >= prev,
+                    "n={n}, budget={budget}: eff regressed {prev} -> {eff}"
+                );
+                if eff < n {
+                    assert!(
+                        dp_table_bytes(n, eff + 1) > budget,
+                        "n={n}, budget={budget}: cap {eff} could have been {} (still fits)",
+                        eff + 1
+                    );
+                }
+                if eff > 0 {
+                    assert!(
+                        dp_table_bytes(n, eff) <= budget,
+                        "n={n}, budget={budget}: returned cap {eff} does not fit"
+                    );
+                }
+                prev = eff;
+                if budget >= full_bytes {
+                    break;
+                }
+                budget = budget.saturating_add(step);
+            }
+        }
+    }
+
+    #[test]
+    fn effective_max_length_clamps_to_requested_and_n() {
+        // With u64::MAX budget the cap is the smaller of requested and n.
+        for n in 0..=8 {
+            for req in 0..=12 {
+                let eff = effective_max_length(n, req, u64::MAX);
+                assert_eq!(eff, req.min(n), "n={n}, req={req}");
+            }
+        }
+    }
+
+    #[test]
+    fn effective_max_length_zero_budget_falls_back_to_zero() {
+        // Even with zero budget the helper returns 0 — the caller can still
+        // emit the trivial counts[0] = 1 result rather than aborting.
+        for n in 0..=8 {
+            assert_eq!(effective_max_length(n, n, 0), 0);
+        }
     }
 
     // Verifies `colex_rank` is a perfect hash on each popcount class — the
@@ -918,7 +1032,8 @@ mod tests {
                 if matches!(event, DpEvent::Mask) {
                     mask_count.set(mask_count.get() + 1);
                 }
-            });
+            })
+            .unwrap();
             assert_eq!(
                 mask_count.get(),
                 dp_mask_ticks(n, cap),
@@ -966,7 +1081,8 @@ mod tests {
             if matches!(event, DpEvent::Mask) {
                 mask_count.set(mask_count.get() + 1);
             }
-        });
+        })
+        .unwrap();
         assert_eq!(mask_count.get(), 0);
     }
 }
