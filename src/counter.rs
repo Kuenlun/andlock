@@ -289,7 +289,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
         length: 0,
         count: 1,
     });
-    if n == 0 || max_length == 0 {
+    if max_length == 0 {
         return counts;
     }
 
