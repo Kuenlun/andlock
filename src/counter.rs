@@ -450,24 +450,7 @@ mod tests {
     use crate::grid::{GridDefinition, build_grid_definition, compute_blocks};
 
     // IDDFS oracle: cross-checks count_patterns_dp. Doesn't scale past n ≈ 25.
-    enum DfsEvent {
-        PassStart { target: usize, pair_total: u64 },
-        PassTick { target: usize, pair_index: u64 },
-        LengthDone { length: usize, count: u128 },
-    }
-
-    #[must_use]
-    const fn dfs_pass_ticks(n: usize) -> u64 {
-        let n = n as u64;
-        n.saturating_mul(n.saturating_sub(1))
-    }
-
-    fn count_patterns_dfs<F: FnMut(DfsEvent)>(
-        n: usize,
-        blocks: &[u32],
-        max_length: usize,
-        mut on_event: F,
-    ) -> Vec<u128> {
+    fn count_patterns_dfs(n: usize, blocks: &[u32], max_length: usize) -> Vec<u128> {
         assert!(
             n <= MAX_POINTS,
             "N={n} exceeds the supported maximum of {MAX_POINTS}"
@@ -479,42 +462,24 @@ mod tests {
         );
 
         if blocks.iter().all(|&b| b == 0) {
-            let counts = count_unconstrained(n, max_length);
-            for (k, &c) in counts.iter().enumerate() {
-                on_event(DfsEvent::LengthDone {
-                    length: k,
-                    count: c,
-                });
-            }
-            return counts;
+            return count_unconstrained(n, max_length);
         }
 
         let mut counts = vec![0u128; max_length + 1];
         counts[0] = 1;
-        on_event(DfsEvent::LengthDone {
-            length: 0,
-            count: 1,
-        });
         if n == 0 || max_length == 0 {
             return counts;
         }
         counts[1] = n as u128;
-        on_event(DfsEvent::LengthDone {
-            length: 1,
-            count: n as u128,
-        });
         if max_length < 2 {
             return counts;
         }
 
         let full_mask: u32 = (1u32 << n) - 1;
-        let pair_total = dfs_pass_ticks(n);
 
         for (i, count_slot) in counts[2..].iter_mut().enumerate() {
             let target = i + 2;
-            on_event(DfsEvent::PassStart { target, pair_total });
             let mut count_target = 0u128;
-            let mut pair_index: u64 = 0;
             for start in 0..n {
                 let start_bit = 1u32 << start;
                 let row = start * n;
@@ -539,15 +504,9 @@ mod tests {
                             );
                         }
                     }
-                    pair_index += 1;
-                    on_event(DfsEvent::PassTick { target, pair_index });
                 }
             }
             *count_slot = count_target;
-            on_event(DfsEvent::LengthDone {
-                length: target,
-                count: count_target,
-            });
         }
 
         counts
@@ -598,7 +557,7 @@ mod tests {
     // both algorithms are verified in a single pass.
     fn count(n: usize, blocks: &[u32], max_length: usize) -> Vec<u128> {
         let dp = count_patterns_dp(n, blocks, max_length, |_| {});
-        let dfs = count_patterns_dfs(n, blocks, max_length, |_| {});
+        let dfs = count_patterns_dfs(n, blocks, max_length);
         assert_eq!(
             dp, dfs,
             "DP and DFS counts diverge for n={n}, max_length={max_length}"
@@ -834,127 +793,6 @@ mod tests {
         assert_ne!(counts[3], 6);
     }
 
-    // LengthDone must fire for every slot of the returned vector with values
-    // matching the vector, in strictly ascending order.
-    #[test]
-    fn dfs_length_done_events_match_returned_counts() {
-        let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
-        let n = g.points.len();
-        let seen = std::cell::RefCell::new(Vec::<(usize, u128)>::new());
-        let counts = count_patterns_dfs(n, &blocks, n, |event| {
-            if let DfsEvent::LengthDone { length, count } = event {
-                seen.borrow_mut().push((length, count));
-            }
-        });
-        let expected: Vec<(usize, u128)> = counts.iter().copied().enumerate().collect();
-        assert_eq!(*seen.borrow(), expected);
-    }
-
-    #[test]
-    fn dfs_length_done_events_fire_on_fast_path() {
-        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
-        let blocks = compute_blocks(&g);
-        assert!(blocks.iter().all(|&b| b == 0));
-        let n = g.points.len();
-        let seen = std::cell::RefCell::new(Vec::<(usize, u128)>::new());
-        let counts = count_patterns_dfs(n, &blocks, n, |event| {
-            if let DfsEvent::LengthDone { length, count } = event {
-                seen.borrow_mut().push((length, count));
-            }
-        });
-        let expected: Vec<(usize, u128)> = counts.iter().copied().enumerate().collect();
-        assert_eq!(*seen.borrow(), expected);
-    }
-
-    #[test]
-    fn iddfs_length_done_events_fire_in_ascending_order() {
-        let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
-        let n = g.points.len();
-        let seen = std::cell::RefCell::new(Vec::<usize>::new());
-        let counts = count_patterns_dfs(n, &blocks, n, |event| {
-            if let DfsEvent::LengthDone { length, count } = event {
-                seen.borrow_mut().push(length);
-                assert_eq!(count, counts_oracle(&g)[length]);
-            }
-        });
-        let expected: Vec<usize> = (0..=n).collect();
-        assert_eq!(*seen.borrow(), expected);
-        let _ = counts;
-    }
-
-    // Oracle for iddfs_length_done_events_fire_in_ascending_order.
-    fn counts_oracle(g: &crate::grid::GridDefinition) -> Vec<u128> {
-        let blocks = compute_blocks(g);
-        count_patterns_dp(g.points.len(), &blocks, g.points.len(), |_| {})
-    }
-
-    #[derive(Debug, PartialEq)]
-    enum PassEv {
-        Start(usize),
-        Tick(usize),
-        Done(usize),
-    }
-
-    #[test]
-    fn iddfs_pass_start_precedes_pass_ticks_and_length_done_for_each_target() {
-        let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
-        let n = g.points.len();
-        let log = std::cell::RefCell::new(Vec::<PassEv>::new());
-        count_patterns_dfs(n, &blocks, n, |event| match event {
-            DfsEvent::PassStart { target, .. } => log.borrow_mut().push(PassEv::Start(target)),
-            DfsEvent::PassTick { target, .. } => log.borrow_mut().push(PassEv::Tick(target)),
-            DfsEvent::LengthDone { length, .. } => log.borrow_mut().push(PassEv::Done(length)),
-        });
-
-        let log = log.into_inner();
-        // Lengths 0 and 1 emit Done before the first pass.
-        assert_eq!(log[0], PassEv::Done(0));
-        assert_eq!(log[1], PassEv::Done(1));
-
-        // For each target ≥ 2: one Start, then pair_total Ticks, then one Done.
-        let pair_total = n * (n - 1);
-        let mut pos = 2usize;
-        for target in 2..=n {
-            assert_eq!(log[pos], PassEv::Start(target), "target={target}");
-            pos += 1;
-            for _ in 0..pair_total {
-                assert_eq!(log[pos], PassEv::Tick(target), "target={target}");
-                pos += 1;
-            }
-            assert_eq!(log[pos], PassEv::Done(target), "target={target}");
-            pos += 1;
-        }
-        assert_eq!(pos, log.len());
-    }
-
-    #[test]
-    fn iddfs_pass_tick_count_matches_pair_total() {
-        let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
-        let n = g.points.len();
-        let expected_per_pass = dfs_pass_ticks(n);
-
-        let current_total = std::cell::Cell::new(0u64);
-        count_patterns_dfs(n, &blocks, n, |event| match event {
-            DfsEvent::PassStart { pair_total, .. } => {
-                assert_eq!(pair_total, expected_per_pass);
-                current_total.set(0);
-            }
-            DfsEvent::PassTick { pair_index, .. } => {
-                current_total.set(pair_index);
-            }
-            DfsEvent::LengthDone { .. } => {
-                // After Done, the tick counter must have reached pair_total
-                // (only meaningful for passes ≥ 2 where a Start was emitted).
-            }
-        });
-        // Final pass must have ticked all the way to pair_total.
-        assert_eq!(current_total.get(), expected_per_pass);
-    }
-
     #[test]
     fn dp_table_bytes_zero_n_or_zero_max_length_returns_counts_only() {
         // n == 0: only counts[0..=0] is allocated, so 16 bytes.
@@ -1111,22 +949,5 @@ mod tests {
             }
         });
         assert_eq!(mask_count.get(), 0);
-    }
-
-    #[test]
-    fn iddfs_no_pass_events_on_unconstrained_fast_path() {
-        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
-        let blocks = compute_blocks(&g);
-        assert!(blocks.iter().all(|&b| b == 0));
-        let n = g.points.len();
-        let pass_starts = std::cell::Cell::new(0usize);
-        let pass_ticks = std::cell::Cell::new(0usize);
-        count_patterns_dfs(n, &blocks, n, |event| match event {
-            DfsEvent::PassStart { .. } => pass_starts.set(pass_starts.get() + 1),
-            DfsEvent::PassTick { .. } => pass_ticks.set(pass_ticks.get() + 1),
-            DfsEvent::LengthDone { .. } => {}
-        });
-        assert_eq!(pass_starts.get(), 0);
-        assert_eq!(pass_ticks.get(), 0);
     }
 }
