@@ -22,11 +22,8 @@ use serde::{Deserialize, Serialize};
 
 /// Hard upper bound on the number of nodes the program accepts.
 ///
-/// Both algorithms represent the visited set as a `u32` bitmask, so
+/// The DP algorithm represents the visited set as a `u32` bitmask, so
 /// `1u32 << n` must not overflow — limiting `n` to at most 31.
-/// The algorithm router in [`crate::counter`] chooses between the DP and DFS
-/// implementations at runtime based on available system memory, so there is no
-/// longer a fixed memory-based ceiling.
 pub const MAX_POINTS: usize = 31;
 
 /// Finite set of integer-coordinate nodes in `dimensions`-dimensional space.

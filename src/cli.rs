@@ -22,9 +22,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
 
-use clap::ValueEnum;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Args, Parser, Subcommand};
 
@@ -42,20 +41,8 @@ const STYLES: Styles = Styles::styled()
 use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
-use andlock::counter::{
-    Algorithm, DfsEvent, DpEvent, choose_algorithm, count_patterns_dfs, count_patterns_dp,
-    dp_mask_ticks, dp_table_bytes,
-};
+use andlock::counter::{DpEvent, count_patterns_dp, dp_mask_ticks, dp_table_bytes};
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
-
-/// Default memory budget consulted by `--algorithm auto` when the user does
-/// not pass `--memory-limit`. 1 GiB lets the layered DP run every
-/// supported `n ≤ 24` problem (the 4×4 + 8 free-points monotonicity test
-/// peaks at ~990 MiB) and falls back to DFS for `n ≥ 25`, where the peak
-/// layer pair grows past 2 GiB. The DP no longer allocates a `2ⁿ`
-/// mask→index lookup, so this budget is now driven entirely by the DP
-/// layers themselves.
-const DEFAULT_MEMORY_LIMIT: &str = "1G";
 
 #[derive(Parser)]
 #[command(
@@ -89,9 +76,6 @@ enum Command {
         #[command(flatten)]
         range: RangeArgs,
 
-        #[command(flatten)]
-        engine: EngineArgs,
-
         /// Suppress progress, timing output, and the ASCII grid preview (results still printed to stdout).
         #[arg(short, long)]
         quiet: bool,
@@ -116,42 +100,10 @@ enum Command {
         #[command(flatten)]
         range: RangeArgs,
 
-        #[command(flatten)]
-        engine: EngineArgs,
-
         /// Suppress progress, timing output, and the ASCII grid preview (results still printed to stdout).
         #[arg(short, long)]
         quiet: bool,
     },
-}
-
-/// User-selectable counting algorithm. `Auto` defers to [`choose_algorithm`];
-/// the other two variants force the underlying counter regardless of the
-/// memory estimate (useful for benchmarks and reproducibility).
-#[derive(Clone, Copy, Debug, ValueEnum)]
-enum AlgorithmChoice {
-    /// Pick DP if its estimated peak fits in `--memory-limit`, else DFS.
-    Auto,
-    /// Force the bitmask DP. Will allocate the full table even if it exceeds the limit.
-    Dp,
-    /// Force IDDFS. O(n) memory at the cost of substantially more CPU work.
-    Dfs,
-}
-
-#[derive(Args)]
-struct EngineArgs {
-    /// Counting algorithm: `auto` (default) routes by estimated DP memory; `dp` forces the bitmask DP; `dfs` forces IDDFS. Forcing `dp` past the memory budget can swap or OOM on big grids — use deliberately.
-    #[arg(long, value_enum, default_value_t = AlgorithmChoice::Auto)]
-    algorithm: AlgorithmChoice,
-
-    /// Memory budget for `--algorithm auto`. Accepts plain bytes ("1024") or values with K/M/G/T suffixes ("512M", "1G", "2GiB"); suffixes use binary units (1 KiB = 1024 B). Ignored when `--algorithm` is `dp` or `dfs`.
-    #[arg(
-        long,
-        value_name = "SIZE",
-        default_value = DEFAULT_MEMORY_LIMIT,
-        value_parser = parse_memory_size,
-    )]
-    memory_limit: u64,
 }
 
 #[derive(Args)]
@@ -209,114 +161,6 @@ fn bar_style() -> ProgressStyle {
         .progress_chars("━━╌")
 }
 
-/// Per-pass bar for IDDFS. Each pass counts patterns of a single length, so
-/// the `{eta}` reflects the completion of *that* length only — the template
-/// spells this out to avoid confusion with a global ETA.
-fn iddfs_bar_style() -> ProgressStyle {
-    ProgressStyle::with_template("  {msg}  [{bar:40.cyan/dim}]  {percent}%  partial eta {eta}")
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .progress_chars("━━╌")
-}
-
-/// Parses `--memory-limit` values like "1024", "512M", "2GiB". Suffixes use
-/// binary units (KiB / MiB / …) and are case-insensitive; a bare number is
-/// interpreted as raw bytes. Used as a `clap` `value_parser`, so the returned
-/// `String` error is rendered into the standard CLI diagnostic.
-fn parse_memory_size(s: &str) -> Result<u64, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("memory size is empty".into());
-    }
-    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-    let (num_str, suffix) = s.split_at(split);
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| format!("invalid number in memory size: {s:?}"))?;
-    let multiplier: u64 = match suffix.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1,
-        "k" | "kb" | "ki" | "kib" => 1024,
-        "m" | "mb" | "mi" | "mib" => 1024u64.pow(2),
-        "g" | "gb" | "gi" | "gib" => 1024u64.pow(3),
-        "t" | "tb" | "ti" | "tib" => 1024u64.pow(4),
-        other => {
-            return Err(format!(
-                "unknown memory size suffix {other:?} (expected one of B, K, M, G, T)"
-            ));
-        }
-    };
-    num.checked_mul(multiplier)
-        .ok_or_else(|| format!("memory size overflows u64: {s:?}"))
-}
-
-/// Renders a byte count in the largest binary unit ≥ 1, with one decimal
-/// place. Pure integer arithmetic so the project's `clippy::pedantic` ban
-/// on precision-loss casts holds.
-fn format_bytes(bytes: u64) -> String {
-    const KIB: u64 = 1024;
-    const MIB: u64 = KIB * 1024;
-    const GIB: u64 = MIB * 1024;
-    const TIB: u64 = GIB * 1024;
-    if bytes >= TIB {
-        let whole = bytes / TIB;
-        let frac = (bytes % TIB) * 10 / TIB;
-        format!("{whole}.{frac} TiB")
-    } else if bytes >= GIB {
-        let whole = bytes / GIB;
-        let frac = (bytes % GIB) * 10 / GIB;
-        format!("{whole}.{frac} GiB")
-    } else if bytes >= MIB {
-        let whole = bytes / MIB;
-        let frac = (bytes % MIB) * 10 / MIB;
-        format!("{whole}.{frac} MiB")
-    } else if bytes >= KIB {
-        let whole = bytes / KIB;
-        let frac = (bytes % KIB) * 10 / KIB;
-        format!("{whole}.{frac} KiB")
-    } else {
-        format!("{bytes} B")
-    }
-}
-
-/// Resolves the user's `--algorithm` choice into the concrete [`Algorithm`]
-/// the counter will run, given the problem size and budget. When `quiet` is
-/// `false`, prints a one-line diagnostic explaining the decision.
-fn resolve_algorithm(
-    choice: AlgorithmChoice,
-    n: usize,
-    max_length: usize,
-    memory_limit: u64,
-    quiet: bool,
-) -> Algorithm {
-    let algorithm = match choice {
-        AlgorithmChoice::Auto => choose_algorithm(n, max_length, memory_limit),
-        AlgorithmChoice::Dp => Algorithm::Dp,
-        AlgorithmChoice::Dfs => Algorithm::Dfs,
-    };
-    if !quiet {
-        let line = match (choice, algorithm) {
-            (AlgorithmChoice::Auto, Algorithm::Dp) => "  [Auto] Selected DP".to_owned(),
-            // Phrased as a delta over the budget so the message stays
-            // unambiguous even when the estimate and budget round to
-            // identical strings (e.g. both "1.0 GiB" when DP overshoots by
-            // a few KiB) — and tells the user exactly how much to raise
-            // `--memory-limit` if they want DP after all.
-            (AlgorithmChoice::Auto, Algorithm::Dfs) => {
-                let overflow =
-                    format_bytes(dp_table_bytes(n, max_length).saturating_sub(memory_limit));
-                let limit_fmt = format_bytes(memory_limit);
-                format!(
-                    "  [Auto] Selected DFS: DP would need {overflow} more than the \
-                     {limit_fmt} budget (raise --memory-limit or pass --algorithm dp)"
-                )
-            }
-            (AlgorithmChoice::Dp, _) => "  [Forced] DP".to_owned(),
-            (AlgorithmChoice::Dfs, _) => "  [Forced] DFS".to_owned(),
-        };
-        eprintln!("{line}");
-    }
-    algorithm
-}
-
 fn print_length(
     length: usize,
     count: u128,
@@ -335,50 +179,7 @@ fn print_length(
     }
 }
 
-fn run_iddfs(
-    n: usize,
-    blocks: &[u32],
-    max_length: usize,
-    min_length: usize,
-    quiet: bool,
-    lines: &mut Vec<String>,
-) -> Vec<u128> {
-    // One progress bar per pass: IDDFS counts a single length at a time, and
-    // indicatif's `{eta}` on that bar is the ETA to finish *this* length —
-    // rendered as "partial eta" by `iddfs_bar_style` so the user never mistakes
-    // it for a global estimate.
-    let mut pass_pb: Option<ProgressBar> = None;
-    count_patterns_dfs(n, blocks, max_length, |event| match event {
-        DfsEvent::PassStart { target, pair_total } => {
-            if !quiet {
-                let pb = crate::signal::progress().add(ProgressBar::new(pair_total));
-                pb.set_style(iddfs_bar_style());
-                pb.set_message(format!("Counting length {target} (IDDFS)"));
-                pb.enable_steady_tick(Duration::from_millis(80));
-                pass_pb = Some(pb);
-            }
-        }
-        DfsEvent::PassTick { .. } => {
-            if let Some(ref pb) = pass_pb {
-                pb.inc(1);
-            }
-        }
-        DfsEvent::LengthDone { length, count } => {
-            if let Some(pb) = pass_pb.take() {
-                pb.finish_and_clear();
-            }
-            print_length(length, count, min_length, max_length, None, lines);
-        }
-    })
-}
-
-fn run_pipeline(
-    grid: &GridDefinition,
-    min_length: usize,
-    max_length: usize,
-    engine: &EngineArgs,
-    quiet: bool,
-) {
+fn run_pipeline(grid: &GridDefinition, min_length: usize, max_length: usize, quiet: bool) {
     let n = grid.points.len();
     let dim = grid.dimensions;
 
@@ -399,51 +200,44 @@ fn run_pipeline(
         pb.finish_and_clear();
     }
 
-    let algorithm = resolve_algorithm(engine.algorithm, n, max_length, engine.memory_limit, quiet);
-
     // DP uses a single global bar with one tick per popcount-`p` bitmask
     // visited (`dp_mask_ticks(n, max_length)` total). The bar is suppressed
     // when no ticks will fire — both for `--quiet` and for trivially small
     // caps (`max_length < 2`) where the popcount loop never runs and an
     // empty bar would otherwise flash on screen.
-    // IDDFS manages one bar per pass inside its event closure instead.
     let dp_ticks = dp_mask_ticks(n, max_length);
-    let count_pb: Option<ProgressBar> =
-        if quiet || matches!(algorithm, Algorithm::Dfs) || dp_ticks == 0 {
-            None
-        } else {
-            let pb = crate::signal::progress().add(ProgressBar::new(dp_ticks));
-            pb.set_style(bar_style());
-            pb.set_message(format!("Counting patterns ({n} points, DP)"));
-            pb.enable_steady_tick(Duration::from_millis(80));
-            Some(pb)
-        };
+    let count_pb: Option<ProgressBar> = if quiet || dp_ticks == 0 {
+        None
+    } else {
+        let mem_est = dp_table_bytes(n, max_length);
+        let pb = crate::signal::progress().add(ProgressBar::new(dp_ticks));
+        pb.set_style(bar_style());
+        pb.set_message(format!("{n} points, ~{}", HumanBytes(mem_est)));
+        pb.enable_steady_tick(Duration::from_millis(80));
+        Some(pb)
+    };
 
     // Per-length lines are printed the moment they are finalized so the user
     // sees results live. We also keep them in `lines` to size the separator.
     let mut lines: Vec<String> = Vec::new();
     let t1 = Instant::now();
-    let counts = match algorithm {
-        Algorithm::Dp => count_patterns_dp(n, &blocks, max_length, |event| match event {
-            DpEvent::Mask => {
-                if let Some(ref pb) = count_pb {
-                    pb.inc(1);
-                }
+    let counts = count_patterns_dp(n, &blocks, max_length, |event| match event {
+        DpEvent::Mask => {
+            if let Some(ref pb) = count_pb {
+                pb.inc(1);
             }
-            DpEvent::LengthDone { length, count } => {
-                print_length(
-                    length,
-                    count,
-                    min_length,
-                    max_length,
-                    count_pb.as_ref(),
-                    &mut lines,
-                );
-            }
-        }),
-        // IDDFS emits final per-length counts one pass at a time.
-        Algorithm::Dfs => run_iddfs(n, &blocks, max_length, min_length, quiet, &mut lines),
-    };
+        }
+        DpEvent::LengthDone { length, count } => {
+            print_length(
+                length,
+                count,
+                min_length,
+                max_length,
+                count_pb.as_ref(),
+                &mut lines,
+            );
+        }
+    });
     let elapsed = t1.elapsed();
 
     if let Some(pb) = count_pb {
@@ -476,7 +270,6 @@ pub fn run() -> Result<()> {
             free_points,
             export_json,
             range,
-            engine,
             quiet,
         } => {
             let parsed = parse_dims(&dims).map_err(|e| anyhow!("{e}"))?;
@@ -498,14 +291,13 @@ pub fn run() -> Result<()> {
                 println!("{preview}");
                 println!();
             }
-            run_pipeline(&grid, min_length, max_length, &engine, quiet);
+            run_pipeline(&grid, min_length, max_length, quiet);
         }
         Command::File {
             path,
             export_json,
             simplify,
             range,
-            engine,
             quiet,
         } => {
             let stdin_sentinel = std::path::Path::new("-");
@@ -543,60 +335,9 @@ pub fn run() -> Result<()> {
                 println!("{preview}");
                 println!();
             }
-            run_pipeline(&grid, min_length, max_length, &engine, quiet);
+            run_pipeline(&grid, min_length, max_length, quiet);
         }
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parse_memory_size_accepts_plain_bytes() {
-        assert_eq!(parse_memory_size("1024"), Ok(1024));
-        assert_eq!(parse_memory_size("0"), Ok(0));
-        assert_eq!(parse_memory_size("  2048  "), Ok(2048));
-    }
-
-    #[test]
-    fn parse_memory_size_accepts_binary_suffixes() {
-        assert_eq!(parse_memory_size("1K"), Ok(1024));
-        assert_eq!(parse_memory_size("1KiB"), Ok(1024));
-        assert_eq!(parse_memory_size("1kb"), Ok(1024));
-        assert_eq!(parse_memory_size("2M"), Ok(2 * 1024 * 1024));
-        assert_eq!(parse_memory_size("1G"), Ok(1024 * 1024 * 1024));
-        assert_eq!(parse_memory_size("1T"), Ok(1024u64.pow(4)));
-    }
-
-    #[test]
-    fn parse_memory_size_rejects_bad_inputs() {
-        assert!(parse_memory_size("").is_err());
-        assert!(parse_memory_size("abc").is_err());
-        assert!(parse_memory_size("1X").is_err());
-        assert!(parse_memory_size("-1").is_err());
-        // u64 overflow on the multiplier
-        assert!(parse_memory_size("999999999999T").is_err());
-    }
-
-    #[test]
-    fn parse_memory_size_default_constant_round_trips() {
-        // The CLI's default budget string must parse cleanly.
-        assert_eq!(
-            parse_memory_size(DEFAULT_MEMORY_LIMIT),
-            Ok(1024 * 1024 * 1024)
-        );
-    }
-
-    #[test]
-    fn format_bytes_picks_appropriate_unit() {
-        assert_eq!(format_bytes(0), "0 B");
-        assert_eq!(format_bytes(1023), "1023 B");
-        assert_eq!(format_bytes(1024), "1.0 KiB");
-        assert_eq!(format_bytes(1024 * 1024), "1.0 MiB");
-        assert_eq!(format_bytes(1024 * 1024 * 1024), "1.0 GiB");
-        assert_eq!(format_bytes(1536), "1.5 KiB");
-    }
 }
