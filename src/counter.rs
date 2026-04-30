@@ -625,6 +625,7 @@ mod tests {
         assert_eq!(counts[0], 1);
         assert_eq!(counts[1], 9);
         assert_eq!(counts[2], 56);
+        assert_eq!(counts[3], 320);
         assert_eq!(counts[4], 1_624);
         assert_eq!(counts[5], 7_152);
         assert_eq!(counts[6], 26_016);
