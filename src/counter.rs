@@ -1199,13 +1199,12 @@ mod tests {
         let blocks = compute_blocks(&g);
         assert!(blocks.iter().all(|&b| b == 0));
         let n = g.points.len();
-        let mask_count = std::cell::Cell::new(0u64);
         let mut scratch = DpScratch::allocate(n, &blocks, n).unwrap();
         count_patterns_dp(&mut scratch, n, &blocks, n, |event| {
-            if matches!(event, DpEvent::Mask) {
-                mask_count.set(mask_count.get() + 1);
-            }
+            assert!(
+                !matches!(event, DpEvent::Mask),
+                "unconstrained fast path must not emit Mask events",
+            );
         });
-        assert_eq!(mask_count.get(), 0);
     }
 }
