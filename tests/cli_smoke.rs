@@ -5,8 +5,6 @@
 // `oracles.rs`; here we only check that the binary reaches the right
 // branch and exits with the documented code.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 mod common;
 
 use predicates::str::contains;

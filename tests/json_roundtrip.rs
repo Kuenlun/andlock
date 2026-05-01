@@ -4,8 +4,6 @@
 // binary boundary: bytes printed by `grid --export-json` must round-trip
 // back through `file -` and produce identical counts.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 mod common;
 
 use std::io::Write;

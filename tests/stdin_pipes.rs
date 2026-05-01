@@ -3,8 +3,6 @@
 // `file -` reads from stdin until EOF; the read path must agree with the
 // regular file path on bytes the user wrote elsewhere.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 mod common;
 
 use std::io::Write;

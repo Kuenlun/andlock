@@ -4,8 +4,6 @@
 // a hard-coded number. C1/C2 in particular guard against bugs in
 // coordinate handling that a square-grid oracle would never expose.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 mod common;
 
 use common::{bin, parse_counts, parse_total};

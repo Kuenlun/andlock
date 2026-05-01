@@ -4,8 +4,6 @@
 // to stdout, diagnostics to stderr, `--human` is opt-in, exit codes follow
 // the documented convention.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 mod common;
 
 use common::{bin, parse_counts, parse_points, parse_total};

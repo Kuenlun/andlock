@@ -194,7 +194,6 @@ fn attach_free_points(rows: &mut [String], n_free: usize, grid_rows: usize) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use andlock::grid::GridDefinition;

@@ -5,17 +5,21 @@
 // fragile snapshots. The reference oracles live here so any test can
 // reuse a single source of truth.
 
-#![allow(
-    dead_code,
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::missing_panics_doc
-)]
+// Each integration-test binary (`tests/*.rs`) consumes a different subset of
+// these helpers; the items unused by a given binary would otherwise trip
+// `dead_code` on a per-binary basis.
+#![allow(dead_code)]
 
 use assert_cmd::Command;
 
+/// Builds a `Command` for the `andlock` binary that Cargo produced for the
+/// current test run.
+///
+/// # Panics
+/// Panics if `assert_cmd` cannot locate the binary, which means the test
+/// harness was invoked outside `cargo test` and there is nothing to exercise.
 pub fn bin() -> Command {
-    Command::cargo_bin("andlock").unwrap()
+    Command::cargo_bin("andlock").unwrap_or_else(|err| panic!("locate andlock test binary: {err}"))
 }
 
 /// Parses every `Len  Count` table row out of `stdout` into `(length, count)`.

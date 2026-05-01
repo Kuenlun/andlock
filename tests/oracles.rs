@@ -5,8 +5,6 @@
 // see. Catches regressions in argv plumbing, length filtering, and the
 // final summary line that unit tests cannot.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 mod common;
 
 use common::{

@@ -5,8 +5,6 @@
 // and the warning text without re-testing the byte-counting helpers
 // covered in unit tests.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 mod common;
 
 use common::{bin, parse_counts, parse_total};

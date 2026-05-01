@@ -4,8 +4,6 @@
 // the library level — these tests only verify that those messages survive
 // the CLI wiring and reach **stderr** with a non-zero exit code.
 
-#![allow(clippy::unwrap_used, clippy::expect_used)]
-
 mod common;
 
 use predicates::str::contains;
