@@ -1006,10 +1006,10 @@ mod tests {
                     "n={n}, budget={budget}: eff regressed {prev} -> {eff}"
                 );
                 if eff < n {
+                    let next = eff + 1;
                     assert!(
-                        dp_table_bytes(n, eff + 1) > budget,
-                        "n={n}, budget={budget}: cap {eff} could have been {} (still fits)",
-                        eff + 1
+                        dp_table_bytes(n, next) > budget,
+                        "n={n}, budget={budget}: cap {eff} could have been {next} (still fits)",
                     );
                 }
                 if eff > 0 {
