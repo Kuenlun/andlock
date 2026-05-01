@@ -583,8 +583,6 @@ fn run_pipeline(
     let n = grid.points.len();
     let dim = grid.dimensions;
 
-    let (effective, clamp) = resolve_memory_budget(n, max_length, memory_limit);
-
     // Block matrix
     let block_pb = if quiet {
         None
@@ -601,6 +599,18 @@ fn run_pipeline(
     if let Some(ref pb) = block_pb {
         pb.finish_and_clear();
     }
+
+    // The all-zero block matrix triggers the closed-form fast path inside
+    // `count_patterns_dp`, which never allocates the DP buffers. Skipping
+    // the memory clamp in that case avoids truncating the run to a length
+    // it could trivially compute — e.g. `grid 0 -f 31` ran into the
+    // 143 GiB DP estimate even though no DP would actually run.
+    let unconstrained = blocks.iter().all(|&b| b == 0);
+    let (effective, clamp) = if unconstrained {
+        (max_length, None)
+    } else {
+        resolve_memory_budget(n, max_length, memory_limit)
+    };
 
     // DP uses a single global bar with one tick per popcount-`p` bitmask
     // visited (`dp_mask_ticks(n, effective)` total). The bar is suppressed
