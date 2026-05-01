@@ -123,6 +123,66 @@ pub fn effective_max_length(n: usize, requested: usize, budget_bytes: u64) -> us
     0
 }
 
+/// Allocates a `Vec<u128>` of exactly `len` zeroed entries without any
+/// over-allocation, surfacing allocator failure as `Err` instead of aborting.
+///
+/// The DP scratch buffer goes through this helper so the request size
+/// matches [`dp_layer_capacity`] exactly — the layered DP relies on knowing
+/// the peak working set up front and has no use for a larger backing buffer.
+fn zeroed_buffer(len: usize) -> Result<Vec<u128>, std::collections::TryReserveError> {
+    let mut buf: Vec<u128> = Vec::new();
+    buf.try_reserve_exact(len)?;
+    buf.resize(len, 0);
+    Ok(buf)
+}
+
+/// Pre-allocated working set [`count_patterns_dp`] needs to run.
+///
+/// The DP itself is infallible — every possible memory failure is hoisted
+/// into [`DpScratch::allocate`], the single fallible step, so callers can
+/// react to OOM up front and the algorithm never has to thread an error
+/// through its inner loop. A scratch buffer can be reused across
+/// consecutive runs that share the same `(n, blocks, max_length)` shape.
+pub struct DpScratch {
+    buf: Vec<u128>,
+    half: usize,
+}
+
+impl DpScratch {
+    /// Reserves the working set [`count_patterns_dp`] needs for a run of
+    /// `(n, blocks, max_length)`. Allocates nothing when the DP body
+    /// short-circuits (`max_length < 2`) or takes the unconstrained fast
+    /// path (every block mask is zero).
+    ///
+    /// # Errors
+    /// Returns the underlying [`std::collections::TryReserveError`] when
+    /// the request cannot be satisfied. Surface the error to the user
+    /// and let them lower `--max-length` or set `--memory-limit`.
+    pub fn allocate(
+        n: usize,
+        blocks: &[u32],
+        max_length: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let half = if max_length < 2 || blocks.iter().all(|&b| b == 0) {
+            0
+        } else {
+            dp_layer_capacity(n, max_length)
+        };
+        Self::with_layer_capacity(half)
+    }
+
+    /// Internal entry point that sizes the buffer directly from a
+    /// per-layer capacity. Public callers go through [`Self::allocate`],
+    /// which derives `half` from the run parameters.
+    fn with_layer_capacity(half: usize) -> Result<Self, std::collections::TryReserveError> {
+        zeroed_buffer(half.saturating_mul(2)).map(|buf| Self { buf, half })
+    }
+
+    fn split_mut(&mut self) -> (&mut [u128], &mut [u128]) {
+        self.buf.split_at_mut(self.half)
+    }
+}
+
 /// Computes the per-buffer entry count `M` for the ping-pong DP buffers at
 /// `max_length = l`, namely `max_{p ∈ 1..l} C(n, p)·p`. Returns 0 when
 /// `l < 2` (no DP buffer is needed in that case).
@@ -232,8 +292,8 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 /// # Memory
 /// Two adjacent popcount layers are alive at any time: the source layer
 /// (popcount `p`, read) and the destination (popcount `p+1`, written). Both
-/// live in pre-allocated ping-pong `Vec<u128>` buffers sized to the largest
-/// popcount layer this run will ever hold, swapped in place between
+/// live in the ping-pong slices carved out of `scratch` and sized to the
+/// largest popcount layer this run will ever hold, swapped in place between
 /// iterations — no per-iteration allocation occurs. Each mask of popcount
 /// `p` packs only `p` `u128` slots (one per valid endpoint). Layer-local
 /// indices are computed via a colex-rank formula instead of stored in a
@@ -244,13 +304,9 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 /// prefix/suffix sums to reconstruct the rank in O(1). See
 /// [`dp_table_bytes`] for the exact byte count and
 /// [`effective_max_length`] for clamping a requested cap to a memory
-/// budget.
-///
-/// # Errors
-/// Returns `Err(TryReserveError)` when [`Vec::try_reserve_exact`] cannot
-/// reserve the two ping-pong DP buffers (each `dp_layer_capacity(n,
-/// max_length)` `u128` slots). Callers should surface the error to the
-/// user and let them lower `--max-length` or set `--memory-limit`.
+/// budget. Allocate `scratch` with [`DpScratch::allocate`] using the same
+/// `(n, blocks, max_length)` triple — that hoists every possible memory
+/// failure out of the algorithm itself.
 ///
 /// # Complexity
 /// With `L = max_length`, extension work is bounded by the prefixes of length
@@ -259,13 +315,16 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 /// version; layering only changes storage.
 ///
 /// # Panics
-/// Panics if `n > MAX_POINTS`, `blocks.len() != n * n`, or `max_length > n`.
+/// Panics if `n > MAX_POINTS`, `blocks.len() != n * n`, `max_length > n`,
+/// or `scratch` was sized for a different `(n, max_length)` shape than
+/// the one requested.
 pub fn count_patterns_dp<F: FnMut(DpEvent)>(
+    scratch: &mut DpScratch,
     n: usize,
     blocks: &[u32],
     max_length: usize,
     mut on_event: F,
-) -> Result<Vec<u128>, std::collections::TryReserveError> {
+) -> Vec<u128> {
     assert!(n <= MAX_POINTS, "N={n} exceeds the maximum of {MAX_POINTS}");
     assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
     assert!(
@@ -281,7 +340,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
                 count: c,
             });
         }
-        return Ok(counts);
+        return counts;
     }
 
     let mut counts = vec![0u128; max_length + 1];
@@ -291,7 +350,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
         count: 1,
     });
     if max_length == 0 {
-        return Ok(counts);
+        return counts;
     }
 
     counts[1] = n as u128;
@@ -300,20 +359,15 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
         count: counts[1],
     });
     if max_length < 2 {
-        return Ok(counts);
+        return counts;
     }
 
-    // Reserve both ping-pong buffers up front at the exact capacity the
-    // run will need. Any allocation failure is surfaced to the caller —
-    // we never silently scale the run down, so the user always sees the
-    // counts they asked for or a clear error.
-    let m = dp_layer_capacity(n, max_length);
-    let mut dp_curr: Vec<u128> = Vec::new();
-    dp_curr.try_reserve_exact(m)?;
-    dp_curr.resize(m, 0);
-    let mut dp_next: Vec<u128> = Vec::new();
-    dp_next.try_reserve_exact(m)?;
-    dp_next.resize(m, 0);
+    assert_eq!(
+        scratch.half,
+        dp_layer_capacity(n, max_length),
+        "scratch sized for a different (n, max_length) run"
+    );
+    let (mut dp_curr, mut dp_next) = scratch.split_mut();
 
     let full_mask: u32 = (1u32 << n) - 1;
 
@@ -371,7 +425,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
             blocks,
             p,
             need_dp_next,
-            dp_curr: &dp_curr,
+            dp_curr: &*dp_curr,
             dp_next: &mut dp_next[..next_len],
             counts: &mut counts,
             on_event: &mut on_event,
@@ -390,7 +444,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
         std::mem::swap(&mut dp_curr, &mut dp_next);
     }
 
-    Ok(counts)
+    counts
 }
 
 /// Bundle of state passed into [`process_layer`].
@@ -629,7 +683,8 @@ mod tests {
     // Every test that checks output values goes through this helper so that
     // both algorithms are verified in a single pass.
     fn count(n: usize, blocks: &[u32], max_length: usize) -> Vec<u128> {
-        let dp = count_patterns_dp(n, blocks, max_length, |_| {}).unwrap();
+        let mut scratch = DpScratch::allocate(n, blocks, max_length).unwrap();
+        let dp = count_patterns_dp(&mut scratch, n, blocks, max_length, |_| {});
         let dfs = count_patterns_dfs(n, blocks, max_length);
         assert_eq!(
             dp, dfs,
@@ -747,7 +802,8 @@ mod tests {
         let blocks = compute_blocks(&g);
         let n = g.points.len();
         assert_eq!(n, 21);
-        let counts = count_patterns_dp(n, &blocks, n, |_| {}).unwrap();
+        let mut scratch = DpScratch::allocate(n, &blocks, n).unwrap();
+        let counts = count_patterns_dp(&mut scratch, n, &blocks, n, |_| {});
         for k in 1..=n {
             assert!(
                 counts[k] >= counts[k - 1],
@@ -775,7 +831,8 @@ mod tests {
         let blocks = compute_blocks(&g);
         let n = g.points.len();
         assert_eq!(n, 24);
-        let counts = count_patterns_dp(n, &blocks, n, |_| {}).unwrap();
+        let mut scratch = DpScratch::allocate(n, &blocks, n).unwrap();
+        let counts = count_patterns_dp(&mut scratch, n, &blocks, n, |_| {});
         for k in 1..=n {
             assert!(
                 counts[k] >= counts[k - 1],
@@ -1027,12 +1084,12 @@ mod tests {
         let n = g.points.len();
         for cap in 0..=n {
             let mask_count = std::cell::Cell::new(0u64);
-            count_patterns_dp(n, &blocks, cap, |event| {
+            let mut scratch = DpScratch::allocate(n, &blocks, cap).unwrap();
+            count_patterns_dp(&mut scratch, n, &blocks, cap, |event| {
                 if matches!(event, DpEvent::Mask) {
                     mask_count.set(mask_count.get() + 1);
                 }
-            })
-            .unwrap();
+            });
             assert_eq!(
                 mask_count.get(),
                 dp_mask_ticks(n, cap),
@@ -1072,6 +1129,59 @@ mod tests {
         assert_eq!(dp_layer_capacity(5, 1), 0);
     }
 
+    // `zeroed_buffer` is a thin wrapper around `Vec::try_reserve_exact` plus a
+    // zero-fill: a successful call produces a vector of the requested length
+    // filled with zeros, and an impossible request surfaces the allocator's
+    // error instead of aborting. The unreachable `usize::MAX` request triggers
+    // a capacity overflow inside the allocator, exercising the `?` branch.
+    #[test]
+    fn zeroed_buffer_yields_zeroed_vec_or_propagates_failure() {
+        let buf = zeroed_buffer(4).unwrap();
+        assert_eq!(buf, vec![0u128; 4]);
+        assert_eq!(buf.capacity(), 4);
+
+        assert!(zeroed_buffer(usize::MAX).is_err());
+    }
+
+    // `DpScratch::allocate` skips the (potentially huge) allocation when
+    // `count_patterns_dp` would itself bail out before touching the buffers —
+    // either because the run is too short to enter the popcount loop or
+    // because the unconstrained fast path will handle it.
+    #[test]
+    fn dp_scratch_allocate_is_empty_when_dp_body_short_circuits() {
+        let constrained = compute_blocks(&build_grid_definition(&[3, 3], 0));
+        for max_length in 0..=1 {
+            let scratch = DpScratch::allocate(9, &constrained, max_length).unwrap();
+            assert_eq!(scratch.buf.len(), 0);
+            assert_eq!(scratch.half, 0);
+        }
+
+        let unconstrained = vec![0u32; 9];
+        let scratch = DpScratch::allocate(3, &unconstrained, 3).unwrap();
+        assert_eq!(scratch.buf.len(), 0);
+        assert_eq!(scratch.half, 0);
+    }
+
+    // For a real constrained run the buffer holds two layers of
+    // `dp_layer_capacity(n, max_length)` `u128` slots, all zeroed.
+    #[test]
+    fn dp_scratch_allocate_sizes_to_two_ping_pong_layers() {
+        let blocks = compute_blocks(&build_grid_definition(&[3, 3], 0));
+        let scratch = DpScratch::allocate(9, &blocks, 9).unwrap();
+        let half = dp_layer_capacity(9, 9);
+        assert_eq!(scratch.half, half);
+        assert_eq!(scratch.buf.len(), 2 * half);
+        assert!(scratch.buf.iter().all(|&v| v == 0));
+    }
+
+    // Allocator failure on the underlying request must propagate as an
+    // error rather than aborting. `usize::MAX` saturates the doubled
+    // request and is rejected up front by `Vec::try_reserve_exact`.
+    #[test]
+    fn dp_scratch_with_layer_capacity_propagates_failure() {
+        assert!(DpScratch::with_layer_capacity(usize::MAX).is_err());
+    }
+
     #[test]
     fn dp_mask_ticks_clamps_max_length_above_n() {
         for n in 1..=8 {
@@ -1090,12 +1200,12 @@ mod tests {
         assert!(blocks.iter().all(|&b| b == 0));
         let n = g.points.len();
         let mask_count = std::cell::Cell::new(0u64);
-        count_patterns_dp(n, &blocks, n, |event| {
+        let mut scratch = DpScratch::allocate(n, &blocks, n).unwrap();
+        count_patterns_dp(&mut scratch, n, &blocks, n, |event| {
             if matches!(event, DpEvent::Mask) {
                 mask_count.set(mask_count.get() + 1);
             }
-        })
-        .unwrap();
+        });
         assert_eq!(mask_count.get(), 0);
     }
 }

@@ -213,7 +213,7 @@ fn divide_exact(coord: i32, divisor: i64) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::counter::count_patterns_dp;
+    use crate::counter::{DpScratch, count_patterns_dp};
     use crate::grid::compute_blocks;
 
     fn grid(dimensions: usize, points: Vec<Vec<i32>>) -> GridDefinition {
@@ -224,7 +224,8 @@ mod tests {
         g.validate().unwrap();
         let blocks = compute_blocks(g);
         let n = g.points.len();
-        count_patterns_dp(n, &blocks, n, |_| {}).unwrap()
+        let mut scratch = DpScratch::allocate(n, &blocks, n).unwrap();
+        count_patterns_dp(&mut scratch, n, &blocks, n, |_| {})
     }
 
     /// 3×3 grid translated by (10, 20) and scaled by 3 on both axes.
