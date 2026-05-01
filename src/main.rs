@@ -21,10 +21,13 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 mod cli;
 mod json_format;
+mod memory;
+mod output;
+mod pipeline;
 mod preview;
-mod signal;
+mod tty;
 
 fn main() -> anyhow::Result<()> {
-    signal::install_handler()?;
+    tty::install_handler()?;
     cli::run()
 }

@@ -36,6 +36,14 @@ pub fn progress() -> &'static MultiProgress {
     PROGRESS.get_or_init(MultiProgress::new)
 }
 
+/// Installs the process-wide Ctrl+C handler that clears every active
+/// progress bar and restores the terminal cursor before exiting with
+/// `SIGINT_EXIT_CODE`. Must be called once at startup, before any bar
+/// is created.
+///
+/// # Errors
+/// Returns the underlying `ctrlc` error if a handler is already
+/// registered for this process.
 pub fn install_handler() -> anyhow::Result<()> {
     // Debug-only escape hatch so a subprocess test can exercise `main`'s `?`
     // Err-propagation path. Compiled out of release builds entirely.
