@@ -311,9 +311,19 @@ fn print_length(
     max_length: usize,
     pb: Option<&ProgressBar>,
     lines: &mut Vec<String>,
+    header_printed: &mut bool,
 ) {
     if length >= min_length && length <= max_length && count > 0 {
-        let line = format!("  Length {length:>2}: {count}");
+        if !*header_printed {
+            let header = "  Len  Count".to_owned();
+            match pb {
+                Some(pb) if !pb.is_hidden() => pb.println(&header),
+                _ => println!("{header}"),
+            }
+            lines.push(header);
+            *header_printed = true;
+        }
+        let line = format!("  {length:>3}  {count}");
         match pb {
             Some(pb) if !pb.is_hidden() => pb.println(&line),
             _ => println!("{line}"),
@@ -393,6 +403,7 @@ fn run_pipeline(
     // Per-length lines are printed the moment they are finalized so the user
     // sees results live. We also keep them in `lines` to size the separator.
     let mut lines: Vec<String> = Vec::new();
+    let mut header_printed = false;
     let t1 = Instant::now();
     let counts = count_patterns_dp(n, &blocks, effective, |event| match event {
         DpEvent::Mask => {
@@ -408,6 +419,7 @@ fn run_pipeline(
                 effective,
                 count_pb.as_ref(),
                 &mut lines,
+                &mut header_printed,
             );
         }
     })
