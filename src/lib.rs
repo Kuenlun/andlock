@@ -21,6 +21,9 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! counter and the geometric simplification passes — as independent
 //! modules so they can be reused and tested outside the CLI wrapper.
 
+// Allow `#[coverage(off)]` on test modules under `--cfg coverage_nightly` (nightly-only).
+#![cfg_attr(all(test, coverage_nightly), feature(coverage_attribute))]
+
 pub mod canonicalizer;
 pub mod counter;
 pub mod grid;

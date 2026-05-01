@@ -207,6 +207,7 @@ pub fn build_grid_definition(dims: &[i32], free_points: usize) -> GridDefinition
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

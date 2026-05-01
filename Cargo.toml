@@ -26,6 +26,7 @@ tempfile = "3.27.0"
 [lints.rust]
 unsafe_code = "forbid"
 warnings = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage_nightly)'] }
 
 [lints.clippy]
 pedantic = { level = "deny", priority = -1 }

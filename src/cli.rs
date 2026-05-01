@@ -77,7 +77,7 @@ use crate::json_format::pretty_compact_json;
 use crate::preview::render_preview;
 use andlock::canonicalizer::canonicalize;
 use andlock::counter::{
-    DpEvent, count_patterns_dp, dp_mask_ticks, dp_table_bytes, effective_max_length,
+    DpEvent, DpScratch, count_patterns_dp, dp_mask_ticks, dp_table_bytes, effective_max_length,
 };
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks, parse_dims};
 
@@ -639,21 +639,21 @@ fn run_pipeline(
     // size the trailing separator to the widest row.
     let mut printer = LengthPrinter::new(min_length, effective, human, count_pb.as_ref());
     let t1 = Instant::now();
-    let counts = count_patterns_dp(n, &blocks, effective, |event| match event {
-        DpEvent::Mask => {
-            if let Some(ref pb) = count_pb {
-                pb.inc(1);
-            }
-        }
-        DpEvent::LengthDone { length, count } => printer.print(length, count),
-    })
-    .map_err(|e| {
+    let mut scratch = DpScratch::allocate(n, &blocks, effective).map_err(|e| {
         let needed = dp_table_bytes(n, effective);
         anyhow!(
             "could not allocate ~{} of RAM for the DP buffers: {e}. Lower --max-length or pass --memory-limit to clamp the run to a smaller cap.",
             HumanBytes(needed)
         )
     })?;
+    let counts = count_patterns_dp(&mut scratch, n, &blocks, effective, |event| match event {
+        DpEvent::Mask => {
+            if let Some(ref pb) = count_pb {
+                pb.inc(1);
+            }
+        }
+        DpEvent::LengthDone { length, count } => printer.print(length, count),
+    });
     let elapsed = t1.elapsed();
     // `finish` clears the live row/header bars in live mode (so the
     // region is empty before we paint the static block) and returns
@@ -805,6 +805,7 @@ pub fn run() -> Result<()> {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

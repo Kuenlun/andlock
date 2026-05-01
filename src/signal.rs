@@ -37,6 +37,12 @@ pub fn progress() -> &'static MultiProgress {
 }
 
 pub fn install_handler() -> anyhow::Result<()> {
+    // Debug-only escape hatch so a subprocess test can exercise `main`'s `?`
+    // Err-propagation path. Compiled out of release builds entirely.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("ANDLOCK_FORCE_HANDLER_ERROR").is_some() {
+        anyhow::bail!("simulated handler error (ANDLOCK_FORCE_HANDLER_ERROR set)");
+    }
     ctrlc::set_handler(|| {
         // Clear every active bar and restore the cursor that `enable_steady_tick`
         // hid: `process::exit` skips destructors, so without this the shell

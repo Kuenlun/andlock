@@ -19,8 +19,11 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use anyhow::Result;
 
 pub fn pretty_compact_json<T: serde::Serialize>(value: &T) -> Result<String> {
-    let v = serde_json::to_value(value)?;
-    Ok(format_value(&v, 0))
+    render(serde_json::to_value(value))
+}
+
+fn render(value: serde_json::Result<serde_json::Value>) -> Result<String> {
+    Ok(format_value(&value?, 0))
 }
 
 fn format_value(value: &serde_json::Value, indent: usize) -> String {
@@ -58,8 +61,16 @@ fn format_value(value: &serde_json::Value, indent: usize) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
+
+    struct AlwaysFails;
+    impl serde::Serialize for AlwaysFails {
+        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
+            Err(serde::ser::Error::custom("intentional failure"))
+        }
+    }
 
     #[test]
     fn numeric_array_formats_inline() {
@@ -123,12 +134,6 @@ mod tests {
 
     #[test]
     fn serialization_error_propagates() {
-        struct AlwaysFails;
-        impl serde::Serialize for AlwaysFails {
-            fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
-                Err(serde::ser::Error::custom("intentional failure"))
-            }
-        }
         assert!(pretty_compact_json(&AlwaysFails).is_err());
     }
 
