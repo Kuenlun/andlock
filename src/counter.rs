@@ -501,7 +501,6 @@ fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::count_unconstrained;
     use super::*;

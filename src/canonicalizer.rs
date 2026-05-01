@@ -211,7 +211,6 @@ fn divide_exact(coord: i32, divisor: i64) -> i32 {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use crate::counter::count_patterns_dp;

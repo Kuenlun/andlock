@@ -58,7 +58,6 @@ fn format_value(value: &serde_json::Value, indent: usize) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

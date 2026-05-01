@@ -207,7 +207,6 @@ pub fn build_grid_definition(dims: &[i32], free_points: usize) -> GridDefinition
 }
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
