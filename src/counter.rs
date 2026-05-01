@@ -1058,6 +1058,20 @@ mod tests {
         }
     }
 
+    // Covers `C(n, k) = 0` when `k > n`, including the degenerate `n = 0`.
+    #[test]
+    fn binomial_returns_zero_when_k_exceeds_n() {
+        assert_eq!(binomial(3, 5), 0);
+        assert_eq!(binomial(0, 1), 0);
+    }
+
+    // Covers `l < 2`, where no DP buffer is needed and the capacity is 0.
+    #[test]
+    fn dp_layer_capacity_returns_zero_below_two() {
+        assert_eq!(dp_layer_capacity(5, 0), 0);
+        assert_eq!(dp_layer_capacity(5, 1), 0);
+    }
+
     #[test]
     fn dp_mask_ticks_clamps_max_length_above_n() {
         for n in 1..=8 {
