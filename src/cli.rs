@@ -22,7 +22,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use indicatif::{HumanBytes, ProgressBar, ProgressStyle};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Args, Parser, Subcommand};
@@ -324,6 +324,14 @@ fn bar_style() -> ProgressStyle {
         .progress_chars("━━╌")
 }
 
+/// Bar style used for each per-length row of the live count table: just
+/// the message, no bar/spinner/percentage. Each row is its own
+/// `ProgressBar` so we can rewrite them in place when a wider count
+/// arrives and forces a column re-alignment.
+fn row_style() -> ProgressStyle {
+    ProgressStyle::with_template("{msg}").unwrap_or_else(|_| ProgressStyle::default_bar())
+}
+
 /// Renders a `u128` count for display. With `human = false` returns the
 /// raw decimal so output stays pipe-safe and machine-parseable. With
 /// `human = true` groups digits in threes with underscores
@@ -345,34 +353,57 @@ fn format_count(count: u128, human: bool) -> String {
     out
 }
 
-/// Streams per-length count rows as the DP finalizes them. Owns the
-/// rendered lines so the surrounding pipeline can size the trailing
-/// separator to the widest row, and prints the column header lazily on
-/// the first matching row so a fully filtered or memory-clamped run
-/// never emits an orphan header.
+/// Collects per-length count rows as the DP finalizes them and renders
+/// the count column right-aligned to the widest value seen so far. The
+/// header is added lazily on the first matching row so a fully filtered
+/// or memory-clamped run never emits an orphan header.
+///
+/// When a live progress region is available (`anchor` is a visible DP
+/// bar), each row is shown immediately as its own line in the
+/// `MultiProgress`, and every prior row is rewritten on the fly so the
+/// growing column stays aligned. With no live region (quiet runs,
+/// non-TTY, or DP with zero ticks), rows are buffered silently. Once DP
+/// is done, `finish` clears any live bars and returns the collected
+/// entries; the caller paints the final aligned table+summary block via
+/// [`render_final`], which may widen the count column further so the
+/// `Total` / `Points` rows share the same right edge as the table.
 struct LengthPrinter<'a> {
     min_length: usize,
     max_length: usize,
     human: bool,
-    pb: Option<&'a ProgressBar>,
-    lines: Vec<String>,
-    header_printed: bool,
+    entries: Vec<(usize, u128)>,
+    live: Option<LivePrinter<'a>>,
+}
+
+/// Live-mode state: one `ProgressBar` per displayed line (header + one
+/// per row), all stacked above the DP `anchor` bar in a shared
+/// `MultiProgress`. Updating a bar's message is what realigns its row.
+struct LivePrinter<'a> {
+    mp: &'a MultiProgress,
+    anchor: &'a ProgressBar,
+    header_bar: Option<ProgressBar>,
+    row_bars: Vec<ProgressBar>,
 }
 
 impl<'a> LengthPrinter<'a> {
-    const fn new(
+    fn new(
         min_length: usize,
         max_length: usize,
         human: bool,
-        pb: Option<&'a ProgressBar>,
+        anchor: Option<&'a ProgressBar>,
     ) -> Self {
+        let live = anchor.filter(|a| !a.is_hidden()).map(|anchor| LivePrinter {
+            mp: crate::signal::progress(),
+            anchor,
+            header_bar: None,
+            row_bars: Vec::new(),
+        });
         Self {
             min_length,
             max_length,
             human,
-            pb,
-            lines: Vec::new(),
-            header_printed: false,
+            entries: Vec::new(),
+            live,
         }
     }
 
@@ -380,26 +411,143 @@ impl<'a> LengthPrinter<'a> {
         if length < self.min_length || length > self.max_length || count == 0 {
             return;
         }
-        if !self.header_printed {
-            let header = "  Len  Count".to_owned();
-            self.emit(&header);
-            self.lines.push(header);
-            self.header_printed = true;
+        self.entries.push((length, count));
+        if let Some(live) = self.live.as_mut() {
+            // First matching row also brings in the header line.
+            if live.header_bar.is_none() {
+                let bar = live.mp.insert_before(live.anchor, ProgressBar::new(0));
+                bar.set_style(row_style());
+                live.header_bar = Some(bar);
+            }
+            // Append a fresh bar just above the DP anchor so rows stack
+            // top-to-bottom in the order they finalize.
+            let bar = live.mp.insert_before(live.anchor, ProgressBar::new(0));
+            bar.set_style(row_style());
+            live.row_bars.push(bar);
+            self.realign_live();
         }
-        let line = format!("  {length:>3}  {}", format_count(count, self.human));
-        self.emit(&line);
-        self.lines.push(line);
     }
 
-    /// Routes a fully-formatted line above the active progress bar when
-    /// one is visible, otherwise straight to stdout. Hidden bars are
-    /// treated as absent so we do not silently drop output.
-    fn emit(&self, line: &str) {
-        match self.pb {
-            Some(pb) if !pb.is_hidden() => pb.println(line),
-            _ => println!("{line}"),
+    /// Pushes the freshly recomputed (right-aligned) lines into every
+    /// live bar, so older rows widen to match the new column when a
+    /// longer count arrives.
+    fn realign_live(&self) {
+        let Some(live) = self.live.as_ref() else {
+            return;
+        };
+        let lines = self.render_lines();
+        if let (Some(bar), Some(header)) = (live.header_bar.as_ref(), lines.first()) {
+            bar.set_message(header.clone());
+        }
+        for (bar, line) in live.row_bars.iter().zip(lines.iter().skip(1)) {
+            bar.set_message(line.clone());
         }
     }
+
+    /// Renders the header + per-length rows with the count column
+    /// right-aligned to the widest formatted value (or to "Count" when
+    /// every value is narrower). Returns an empty vector when no row
+    /// has matched, so callers do not paint an orphan header.
+    fn render_lines(&self) -> Vec<String> {
+        const HEADER: &str = "Count";
+        if self.entries.is_empty() {
+            return Vec::new();
+        }
+        let formatted: Vec<String> = self
+            .entries
+            .iter()
+            .map(|(_, c)| format_count(*c, self.human))
+            .collect();
+        let width = formatted
+            .iter()
+            .map(|s| s.chars().count())
+            .max()
+            .unwrap_or(0)
+            .max(HEADER.len());
+        let mut lines = Vec::with_capacity(self.entries.len() + 1);
+        lines.push(format!("  Len  {HEADER:>width$}"));
+        for ((length, _), value) in self.entries.iter().zip(formatted.iter()) {
+            lines.push(format!("  {length:>3}  {value:>width$}"));
+        }
+        lines
+    }
+
+    /// Tears down any live bars and hands back the collected entries so
+    /// the caller can render the final, fully aligned table+summary
+    /// block via [`render_final`] (the live bars used a narrower
+    /// count column when the summary widens it; the static repaint
+    /// replaces them with the unified layout).
+    fn finish(mut self) -> Vec<(usize, u128)> {
+        if let Some(live) = self.live.take() {
+            if let Some(bar) = live.header_bar {
+                bar.finish_and_clear();
+            }
+            for bar in live.row_bars {
+                bar.finish_and_clear();
+            }
+        }
+        self.entries
+    }
+}
+
+/// Renders the per-length table and the trailing summary (`Total` and
+/// `Points`) with a unified column layout: every value is right-aligned
+/// to the same column edge so the table and summary share a separator
+/// width. `total_str = None` skips the `Total` row (used when a memory
+/// clamp truncated the run).
+///
+/// The count column grows as needed: beyond fitting the largest count
+/// and the `Count` header, it is widened so `Total` / `Points` can
+/// right-align their values to the table's right edge despite their
+/// labels being wider than the length column.
+fn render_final(
+    entries: &[(usize, u128)],
+    human: bool,
+    total_str: Option<&str>,
+    points_str: &str,
+) -> (Vec<String>, Vec<String>, usize) {
+    let formatted: Vec<String> = entries
+        .iter()
+        .map(|(_, c)| format_count(*c, human))
+        .collect();
+
+    // Length column is 3 wide; the count column grows so summary rows
+    // (whose labels are wider than 3) can right-align their values to
+    // the same edge as the table. For label `L` with value string `V`:
+    //   row_width = 2 + 3 + 2 + value_w   (table)
+    //             = 2 + L.len() + 2 + V.len()  (summary, exact)
+    // so value_w >= V.len() + L.len() - 3.
+    let mut value_w = formatted
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(0)
+        .max("Count".len());
+    if let Some(s) = total_str {
+        value_w = value_w.max(s.len() + "Total".len() - 3);
+    }
+    value_w = value_w.max(points_str.len() + "Points".len() - 3);
+
+    let row_width = 2 + 3 + 2 + value_w;
+
+    let mut table = Vec::new();
+    if !entries.is_empty() {
+        table.reserve_exact(entries.len() + 1);
+        table.push(format!("  Len  {:>value_w$}", "Count"));
+        for ((length, _), value) in entries.iter().zip(formatted.iter()) {
+            table.push(format!("  {length:>3}  {value:>value_w$}"));
+        }
+    }
+
+    let mut summary = Vec::new();
+    if let Some(s) = total_str {
+        let w = row_width - (2 + "Total".len() + 2);
+        summary.push(format!("  Total  {s:>w$}"));
+    }
+    let w = row_width - (2 + "Points".len() + 2);
+    summary.push(format!("  Points  {points_str:>w$}"));
+
+    (table, summary, row_width)
 }
 
 /// Resolves the effective `max_length` cap against the active memory
@@ -492,28 +640,37 @@ fn run_pipeline(
         )
     })?;
     let elapsed = t1.elapsed();
-    let lines = printer.lines;
+    // `finish` clears the live row/header bars in live mode (so the
+    // region is empty before we paint the static block) and returns
+    // the collected entries; `render_final` then produces a single
+    // unified layout where the table and the `Total`/`Points` summary
+    // rows share the same right-edge.
+    let entries = printer.finish();
 
     if let Some(pb) = count_pb {
         pb.finish_and_clear();
     }
 
-    // Only print a `Total` line when the run covered the full requested range.
     // A clamped run omits the total so partial counts stand on their own;
     // the skip reason and elapsed time appear in the footer on stderr.
     // `Points` qualifies the count so the user does not have to derive it
     // from --max-length or the grid dimensions.
-    let points_line = format!("  Points  {n}");
-    if effective < max_length {
-        let sep_width = lines
-            .iter()
-            .chain(std::iter::once(&points_line))
-            .map(|l| l.chars().count())
-            .max()
-            .unwrap_or(27);
-        println!("{}", "─".repeat(sep_width));
-        println!("{points_line}");
-        if !quiet {
+    let total_str = (effective >= max_length)
+        .then(|| format_count(counts[min_length..=effective].iter().sum(), human));
+    let points_str = n.to_string();
+    let (table, summary, sep_width) =
+        render_final(&entries, human, total_str.as_deref(), &points_str);
+
+    for line in &table {
+        println!("{line}");
+    }
+    println!("{}", "─".repeat(sep_width));
+    for line in &summary {
+        println!("{line}");
+    }
+
+    if !quiet {
+        if effective < max_length {
             if let Some((needed, budget)) = clamp {
                 eprintln!(
                     "  Lengths {}–{} skipped — need {}, only {} available",
@@ -524,22 +681,7 @@ fn run_pipeline(
                 );
             }
             eprintln!("  Computed 0–{effective} of 0–{max_length} in {elapsed:.2?}");
-        }
-    } else {
-        let total: u128 = counts[min_length..=effective].iter().sum();
-        // Pad `Total` to the width of `Points` so the values column-align.
-        let total_line = format!("  Total   {}", format_count(total, human));
-        let sep_width = lines
-            .iter()
-            .chain(std::iter::once(&total_line))
-            .chain(std::iter::once(&points_line))
-            .map(|l| l.chars().count())
-            .max()
-            .unwrap_or(27);
-        println!("{}", "─".repeat(sep_width));
-        println!("{total_line}");
-        println!("{points_line}");
-        if !quiet {
+        } else {
             eprintln!("  Counted in {elapsed:.2?}");
         }
     }
