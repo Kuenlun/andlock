@@ -427,9 +427,18 @@ fn run_pipeline(
     // Only print a `Total` line when the run covered the full requested range.
     // A clamped run omits the total so partial counts stand on their own;
     // the skip reason and elapsed time appear in the footer on stderr.
+    // `Points` qualifies the count so the user does not have to derive it
+    // from --max-length or the grid dimensions.
+    let points_line = format!("  Points  {n}");
     if effective < max_length {
-        let sep_width = lines.iter().map(|l| l.chars().count()).max().unwrap_or(27);
+        let sep_width = lines
+            .iter()
+            .chain(std::iter::once(&points_line))
+            .map(|l| l.chars().count())
+            .max()
+            .unwrap_or(27);
         println!("{}", "─".repeat(sep_width));
+        println!("{points_line}");
         if !quiet {
             if let Some((needed, budget)) = clamp {
                 eprintln!(
@@ -444,15 +453,18 @@ fn run_pipeline(
         }
     } else {
         let total: u128 = counts[min_length..=effective].iter().sum();
-        let total_line = format!("  Total  {total}");
+        // Pad `Total` to the width of `Points` so the values column-align.
+        let total_line = format!("  Total   {total}");
         let sep_width = lines
             .iter()
             .chain(std::iter::once(&total_line))
+            .chain(std::iter::once(&points_line))
             .map(|l| l.chars().count())
             .max()
             .unwrap_or(27);
         println!("{}", "─".repeat(sep_width));
         println!("{total_line}");
+        println!("{points_line}");
         if !quiet {
             eprintln!("  Counted in {elapsed:.2?}");
         }
