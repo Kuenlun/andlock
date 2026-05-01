@@ -64,6 +64,18 @@ fn missing_dims_argument_fails_with_clap_exit_code() {
 }
 
 #[test]
+fn install_handler_failure_propagates_through_main() {
+    // Other integration tests cover the Ok path when they spawn the binary;
+    // this one forces the Err branch so `main`'s `?` propagation is exercised.
+    common::bin()
+        .env("ANDLOCK_FORCE_HANDLER_ERROR", "1")
+        .args(["grid", "3x3", "--quiet"])
+        .assert()
+        .failure()
+        .stderr(contains("simulated handler error"));
+}
+
+#[test]
 fn happy_path_3x3_exits_zero_with_non_empty_stdout() {
     let assert = common::bin()
         .args(["grid", "3x3", "--quiet"])
