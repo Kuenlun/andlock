@@ -26,3 +26,4 @@
 3. **Tone:** Professional, Rustacean. Emphasise safety, correctness, performance, and idiomatic patterns. No marketing language, no filler, no greetings.
 4. **Punctuation:** Do not use em dashes (`—`) or en dashes (`–`). Do not use semicolons (`;`). Prefer short sentences and commas.
 5. **Format:** Output the title on the first line, a blank line, then the body. No surrounding code fences, no preamble, no sign-off, no co-author trailers.
+6. **Persistence:** After producing the PR text, write the exact same content (title, blank line, body, with no fences or trailers) to `pr.md` at the repository root, overwriting any existing file. This file is the canonical artefact the user copies or feeds to `gh pr create --body-file pr.md`. Do not announce or describe the file in the chat output.
