@@ -29,3 +29,4 @@
 3. **Tone:** Professional, Rustacean. Emphasise safety, correctness, performance, and idiomatic patterns. No marketing language, no filler, no greetings.
 4. **Punctuation:** Do not use em dashes (`—`) or en dashes (`–`). Do not use semicolons (`;`). Prefer short sentences and commas.
 5. **Format:** Output the subject on the first line, a blank line, then the body if present. Wrap body lines at around 72 characters. No surrounding code fences, no preamble, no sign-off, no co-author trailers.
+6. **Persistence:** After producing the commit message, write the exact same content (subject, optional blank line, optional body, with no fences or trailers) to `commit.md` at the repository root, overwriting any existing file. This file is the canonical artefact the user copies or feeds to `git commit -F commit.md`. Do not announce or describe the file in the chat output.
