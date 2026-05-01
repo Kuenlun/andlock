@@ -138,6 +138,16 @@ enum Command {
         /// Pattern counts are still printed to stdout.
         #[arg(short, long, help_heading = "Output")]
         quiet: bool,
+
+        /// Group long counts with `_` separators (e.g. `140_704`).
+        ///
+        /// Off by default so the output stays pipe-safe and trivially
+        /// machine-parseable. Uses Rust-style underscores rather than
+        /// locale-dependent commas or spaces, so values can be pasted
+        /// straight into Rust source or any tool that accepts digit
+        /// grouping.
+        #[arg(long, help_heading = "Output")]
+        human: bool,
     },
     /// Count patterns on a grid loaded from JSON.
     ///
@@ -173,6 +183,16 @@ enum Command {
         /// Pattern counts are still printed to stdout.
         #[arg(short, long, help_heading = "Output")]
         quiet: bool,
+
+        /// Group long counts with `_` separators (e.g. `140_704`).
+        ///
+        /// Off by default so the output stays pipe-safe and trivially
+        /// machine-parseable. Uses Rust-style underscores rather than
+        /// locale-dependent commas or spaces, so values can be pasted
+        /// straight into Rust source or any tool that accepts digit
+        /// grouping.
+        #[arg(long, help_heading = "Output")]
+        human: bool,
     },
 }
 
@@ -304,31 +324,81 @@ fn bar_style() -> ProgressStyle {
         .progress_chars("━━╌")
 }
 
-fn print_length(
-    length: usize,
-    count: u128,
+/// Renders a `u128` count for display. With `human = false` returns the
+/// raw decimal so output stays pipe-safe and machine-parseable. With
+/// `human = true` groups digits in threes with underscores
+/// (e.g. `140_704`), matching Rust integer-literal syntax so values
+/// remain locale-neutral and can be pasted directly into source.
+fn format_count(count: u128, human: bool) -> String {
+    let raw = count.to_string();
+    if !human || raw.len() <= 3 {
+        return raw;
+    }
+    let bytes = raw.as_bytes();
+    let mut out = String::with_capacity(raw.len() + (raw.len() - 1) / 3);
+    for (i, &b) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push('_');
+        }
+        out.push(b as char);
+    }
+    out
+}
+
+/// Streams per-length count rows as the DP finalizes them. Owns the
+/// rendered lines so the surrounding pipeline can size the trailing
+/// separator to the widest row, and prints the column header lazily on
+/// the first matching row so a fully filtered or memory-clamped run
+/// never emits an orphan header.
+struct LengthPrinter<'a> {
     min_length: usize,
     max_length: usize,
-    pb: Option<&ProgressBar>,
-    lines: &mut Vec<String>,
-    header_printed: &mut bool,
-) {
-    if length >= min_length && length <= max_length && count > 0 {
-        if !*header_printed {
-            let header = "  Len  Count".to_owned();
-            match pb {
-                Some(pb) if !pb.is_hidden() => pb.println(&header),
-                _ => println!("{header}"),
-            }
-            lines.push(header);
-            *header_printed = true;
+    human: bool,
+    pb: Option<&'a ProgressBar>,
+    lines: Vec<String>,
+    header_printed: bool,
+}
+
+impl<'a> LengthPrinter<'a> {
+    const fn new(
+        min_length: usize,
+        max_length: usize,
+        human: bool,
+        pb: Option<&'a ProgressBar>,
+    ) -> Self {
+        Self {
+            min_length,
+            max_length,
+            human,
+            pb,
+            lines: Vec::new(),
+            header_printed: false,
         }
-        let line = format!("  {length:>3}  {count}");
-        match pb {
-            Some(pb) if !pb.is_hidden() => pb.println(&line),
+    }
+
+    fn print(&mut self, length: usize, count: u128) {
+        if length < self.min_length || length > self.max_length || count == 0 {
+            return;
+        }
+        if !self.header_printed {
+            let header = "  Len  Count".to_owned();
+            self.emit(&header);
+            self.lines.push(header);
+            self.header_printed = true;
+        }
+        let line = format!("  {length:>3}  {}", format_count(count, self.human));
+        self.emit(&line);
+        self.lines.push(line);
+    }
+
+    /// Routes a fully-formatted line above the active progress bar when
+    /// one is visible, otherwise straight to stdout. Hidden bars are
+    /// treated as absent so we do not silently drop output.
+    fn emit(&self, line: &str) {
+        match self.pb {
+            Some(pb) if !pb.is_hidden() => pb.println(line),
             _ => println!("{line}"),
         }
-        lines.push(line);
     }
 }
 
@@ -360,6 +430,7 @@ fn run_pipeline(
     max_length: usize,
     memory_limit: Option<u64>,
     quiet: bool,
+    human: bool,
 ) -> Result<()> {
     let n = grid.points.len();
     let dim = grid.dimensions;
@@ -400,10 +471,10 @@ fn run_pipeline(
         Some(pb)
     };
 
-    // Per-length lines are printed the moment they are finalized so the user
-    // sees results live. We also keep them in `lines` to size the separator.
-    let mut lines: Vec<String> = Vec::new();
-    let mut header_printed = false;
+    // Per-length lines are printed the moment they are finalized so the
+    // user sees results live. The printer also retains them so we can
+    // size the trailing separator to the widest row.
+    let mut printer = LengthPrinter::new(min_length, effective, human, count_pb.as_ref());
     let t1 = Instant::now();
     let counts = count_patterns_dp(n, &blocks, effective, |event| match event {
         DpEvent::Mask => {
@@ -411,17 +482,7 @@ fn run_pipeline(
                 pb.inc(1);
             }
         }
-        DpEvent::LengthDone { length, count } => {
-            print_length(
-                length,
-                count,
-                min_length,
-                effective,
-                count_pb.as_ref(),
-                &mut lines,
-                &mut header_printed,
-            );
-        }
+        DpEvent::LengthDone { length, count } => printer.print(length, count),
     })
     .map_err(|e| {
         let needed = dp_table_bytes(n, effective);
@@ -431,6 +492,7 @@ fn run_pipeline(
         )
     })?;
     let elapsed = t1.elapsed();
+    let lines = printer.lines;
 
     if let Some(pb) = count_pb {
         pb.finish_and_clear();
@@ -466,7 +528,7 @@ fn run_pipeline(
     } else {
         let total: u128 = counts[min_length..=effective].iter().sum();
         // Pad `Total` to the width of `Points` so the values column-align.
-        let total_line = format!("  Total   {total}");
+        let total_line = format!("  Total   {}", format_count(total, human));
         let sep_width = lines
             .iter()
             .chain(std::iter::once(&total_line))
@@ -497,6 +559,7 @@ pub fn run() -> Result<()> {
             range,
             memory,
             quiet,
+            human,
         } => {
             let parsed = parse_dims(&dims).map_err(|e| anyhow!("{e}"))?;
             let grid = build_grid_definition(&parsed, free_points);
@@ -517,7 +580,14 @@ pub fn run() -> Result<()> {
                 println!("{preview}");
                 println!();
             }
-            run_pipeline(&grid, min_length, max_length, memory.memory_limit, quiet)?;
+            run_pipeline(
+                &grid,
+                min_length,
+                max_length,
+                memory.memory_limit,
+                quiet,
+                human,
+            )?;
         }
         Command::File {
             path,
@@ -526,6 +596,7 @@ pub fn run() -> Result<()> {
             range,
             memory,
             quiet,
+            human,
         } => {
             let stdin_sentinel = std::path::Path::new("-");
             let (content, src_label) = if path == stdin_sentinel {
@@ -562,7 +633,14 @@ pub fn run() -> Result<()> {
                 println!("{preview}");
                 println!();
             }
-            run_pipeline(&grid, min_length, max_length, memory.memory_limit, quiet)?;
+            run_pipeline(
+                &grid,
+                min_length,
+                max_length,
+                memory.memory_limit,
+                quiet,
+                human,
+            )?;
         }
     }
 
@@ -598,5 +676,41 @@ mod tests {
         assert!(parse_memory_size("-1").is_err());
         // u64 overflow on the multiplier
         assert!(parse_memory_size("999999999999T").is_err());
+    }
+
+    #[test]
+    fn format_count_raw_when_human_disabled() {
+        assert_eq!(format_count(0, false), "0");
+        assert_eq!(format_count(1_624, false), "1624");
+        assert_eq!(format_count(140_704, false), "140704");
+        assert_eq!(
+            format_count(162_203_611_691_767_643, false),
+            "162203611691767643",
+        );
+    }
+
+    #[test]
+    fn format_count_groups_with_underscores_when_human() {
+        // Short numbers stay untouched so we never produce a leading `_`.
+        assert_eq!(format_count(0, true), "0");
+        assert_eq!(format_count(9, true), "9");
+        assert_eq!(format_count(56, true), "56");
+        assert_eq!(format_count(320, true), "320");
+        // Group boundaries fall on multiples of three from the right.
+        assert_eq!(format_count(1_624, true), "1_624");
+        assert_eq!(format_count(140_704, true), "140_704");
+        assert_eq!(format_count(1_000_000, true), "1_000_000");
+        assert_eq!(
+            format_count(162_203_611_691_767_643, true),
+            "162_203_611_691_767_643",
+        );
+    }
+
+    #[test]
+    fn format_count_handles_u128_extremes() {
+        assert_eq!(
+            format_count(u128::MAX, true),
+            "340_282_366_920_938_463_463_374_607_431_768_211_455",
+        );
     }
 }
