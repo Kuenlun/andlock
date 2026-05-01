@@ -144,3 +144,23 @@ fn export_json_is_byte_stable_across_runs() {
     let b = export_json(&["3x3"]);
     assert_eq!(a, b);
 }
+
+#[test]
+fn file_export_json_without_simplify_emits_grid_verbatim() {
+    // Re-emitting the grid without `--simplify` must preserve the input
+    // byte-for-byte (modulo the normalised pretty-print): the JSON parser
+    // produced the in-memory grid, the writer rebuilds the canonical
+    // pretty-form. This pins the non-simplify branch of the file-arm
+    // export path that translates simplify/no-simplify into either a
+    // canonicalisation pass or the identity.
+    let raw = r#"{"dimensions":2,"points":[[0,0],[1,0]]}"#;
+    let assert = bin()
+        .args(["file", "-", "--export-json"])
+        .write_stdin(raw.to_owned())
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    let value: serde_json::Value = serde_json::from_str(&stdout).expect("output is valid JSON");
+    let original: serde_json::Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(value, original, "no-simplify path must round-trip the grid");
+}

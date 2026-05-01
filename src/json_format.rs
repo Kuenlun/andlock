@@ -16,14 +16,14 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use anyhow::Result;
-
-pub fn pretty_compact_json<T: serde::Serialize>(value: &T) -> Result<String> {
-    render(serde_json::to_value(value))
-}
-
-fn render(value: serde_json::Result<serde_json::Value>) -> Result<String> {
-    Ok(format_value(&value?, 0))
+/// Formats `value` as JSON using the crate's "pretty-compact" rules:
+/// numeric arrays render inline (`[1, 2, 3]`); every other container
+/// expands across lines with two-space indentation; primitives use
+/// `serde_json`'s normal display. The function is infallible — callers
+/// own a [`serde_json::Value`] up front, typically built from primitive
+/// fields whose `Into<Value>` impls cannot fail.
+pub fn pretty_compact_json_value(value: &serde_json::Value) -> String {
+    format_value(value, 0)
 }
 
 fn format_value(value: &serde_json::Value, indent: usize) -> String {
@@ -65,24 +65,16 @@ fn format_value(value: &serde_json::Value, indent: usize) -> String {
 mod tests {
     use super::*;
 
-    struct AlwaysFails;
-    impl serde::Serialize for AlwaysFails {
-        fn serialize<S: serde::Serializer>(&self, _: S) -> Result<S::Ok, S::Error> {
-            Err(serde::ser::Error::custom("intentional failure"))
-        }
-    }
-
     #[test]
     fn numeric_array_formats_inline() {
-        let nums = vec![1, 2, 3];
-        let output = pretty_compact_json(&nums).unwrap();
-        assert_eq!(output, "[1, 2, 3]");
+        let nums = serde_json::json!([1, 2, 3]);
+        assert_eq!(pretty_compact_json_value(&nums), "[1, 2, 3]");
     }
 
     #[test]
     fn object_array_formats_multiline() {
-        let objects = vec![serde_json::json!({"a": 1}), serde_json::json!({"b": 2})];
-        let output = pretty_compact_json(&objects).unwrap();
+        let objects = serde_json::json!([{"a": 1}, {"b": 2}]);
+        let output = pretty_compact_json_value(&objects);
         assert!(
             output.contains('\n'),
             "expected multiline output but got: {output}"
@@ -96,7 +88,7 @@ mod tests {
     #[test]
     fn nested_object_indents_correctly() {
         let nested = serde_json::json!({"outer": {"inner": 42}});
-        let output = pretty_compact_json(&nested).unwrap();
+        let output = pretty_compact_json_value(&nested);
         assert!(
             output.contains("    \"inner\""),
             "expected 4-space indentation for nested key but got: {output}"
@@ -106,7 +98,7 @@ mod tests {
     #[test]
     fn output_is_valid_json_roundtrip() {
         let original = serde_json::json!({"nums": [1, 2], "obj": {"x": true}});
-        let pretty = pretty_compact_json(&original).unwrap();
+        let pretty = pretty_compact_json_value(&original);
         let reparsed: serde_json::Value =
             serde_json::from_str(&pretty).expect("formatted output must be valid JSON");
         assert_eq!(original, reparsed);
@@ -114,37 +106,28 @@ mod tests {
 
     #[test]
     fn primitive_values_format_without_modification() {
-        assert_eq!(pretty_compact_json(&"hello").unwrap(), "\"hello\"");
-        assert_eq!(pretty_compact_json(&42).unwrap(), "42");
-        assert_eq!(pretty_compact_json(&true).unwrap(), "true");
         assert_eq!(
-            pretty_compact_json(&serde_json::Value::Null).unwrap(),
-            "null"
+            pretty_compact_json_value(&serde_json::Value::String("hello".to_owned())),
+            "\"hello\"",
         );
+        assert_eq!(pretty_compact_json_value(&serde_json::json!(42)), "42");
+        assert_eq!(pretty_compact_json_value(&serde_json::json!(true)), "true");
+        assert_eq!(pretty_compact_json_value(&serde_json::Value::Null), "null",);
     }
 
     #[test]
     fn empty_containers_remain_compact() {
-        let empty_array: Vec<i32> = vec![];
-        assert_eq!(pretty_compact_json(&empty_array).unwrap(), "[]");
+        let empty_array = serde_json::Value::Array(Vec::new());
+        assert_eq!(pretty_compact_json_value(&empty_array), "[]");
 
-        let empty_object = serde_json::json!({});
-        assert_eq!(pretty_compact_json(&empty_object).unwrap(), "{}");
-    }
-
-    #[test]
-    fn serialization_error_propagates() {
-        assert!(pretty_compact_json(&AlwaysFails).is_err());
+        let empty_object = serde_json::Value::Object(serde_json::Map::new());
+        assert_eq!(pretty_compact_json_value(&empty_object), "{}");
     }
 
     #[test]
     fn mixed_array_formats_multiline() {
-        let mixed = vec![
-            serde_json::json!({"a": 1}),
-            serde_json::json!(42),
-            serde_json::json!("string"),
-        ];
-        let output = pretty_compact_json(&mixed).unwrap();
+        let mixed = serde_json::json!([{"a": 1}, 42, "string"]);
+        let output = pretty_compact_json_value(&mixed);
         assert!(
             output.contains('\n'),
             "mixed array should be multiline but got: {output}"

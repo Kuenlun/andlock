@@ -30,7 +30,7 @@ use andlock::counter::{DpEvent, DpScratch, count_patterns_dp, dp_mask_ticks, dp_
 use andlock::grid::{GridDefinition, compute_blocks};
 
 use crate::memory::resolve_memory_budget;
-use crate::output::{LengthPrinter, RenderedReport, format_count, render_final};
+use crate::output::{LengthPrinter, RenderedReport, format_count, render_final, style_or_default};
 use crate::tty;
 
 /// Knobs that drive a single counting run. Grouped to keep
@@ -47,17 +47,18 @@ pub struct RunOptions {
 /// Spinner style for short, indeterminate phases (e.g. building the
 /// block matrix): a dim spinner glyph followed by a status message.
 fn spinner_style() -> ProgressStyle {
-    ProgressStyle::with_template("  {spinner:.dim} {msg}")
-        .unwrap_or_else(|_| ProgressStyle::default_spinner())
+    style_or_default("  {spinner:.dim} {msg}", ProgressStyle::default_spinner)
 }
 
 /// Determinate bar style for the DP progress: message, cyan bar,
 /// percentage and ETA. `progress_chars` uses the heavy horizontal
 /// glyphs so the bar reads cleanly in monospace terminals.
 fn bar_style() -> ProgressStyle {
-    ProgressStyle::with_template("  {msg}  [{bar:40.cyan/dim}]  {percent}%  eta {eta}")
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .progress_chars("━━╌")
+    style_or_default(
+        "  {msg}  [{bar:40.cyan/dim}]  {percent}%  eta {eta}",
+        ProgressStyle::default_bar,
+    )
+    .progress_chars("━━╌")
 }
 
 /// Runs the end-to-end counting pipeline for a single grid: builds the
@@ -128,7 +129,16 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
         human,
     });
     if !quiet {
-        print_footer(effective, max_length, clamp, elapsed);
+        let outcome = match clamp {
+            Some((needed, budget)) => RunOutcome::Clamped {
+                effective,
+                max_length,
+                needed,
+                budget,
+            },
+            None => RunOutcome::Complete,
+        };
+        print_footer(outcome, elapsed);
     }
     Ok(())
 }
@@ -209,7 +219,7 @@ fn drive_dp(
         blocks,
         effective,
     } = dp;
-    let mut scratch = DpScratch::allocate(n, blocks, effective).map_err(|e| {
+    let mut scratch = allocate_scratch(n, blocks, effective).map_err(|e| {
         let needed = dp_table_bytes(n, effective);
         anyhow!(
             "could not allocate ~{} of RAM for the DP buffers: {e}. \
@@ -266,15 +276,50 @@ fn print_report(report: ReportInputs<'_>) {
     }
 }
 
-/// Stderr footer: clamp explanation (when applicable) plus elapsed time.
-fn print_footer(
+/// Outcome of a finished run, paired with the data the footer needs to
+/// describe it. Pairing the clamped lengths with the byte estimates in a
+/// single variant prevents a partial state — a `Clamped` outcome is
+/// guaranteed to carry both — so `print_footer` does not need a defensive
+/// inner check.
+#[derive(Copy, Clone)]
+enum RunOutcome {
+    Complete,
+    Clamped {
+        effective: usize,
+        max_length: usize,
+        needed: u64,
+        budget: u64,
+    },
+}
+
+/// Wraps [`DpScratch::allocate`] so subprocess tests can drive the
+/// alloc-failure path through `drive_dp`, exercising the `map_err`
+/// closure and the `?` propagation chain in the production binary.
+/// In release builds this is a transparent forward; the debug-only
+/// hatch substitutes hostile inputs that saturate the underlying
+/// `try_reserve_exact` and surface a real `TryReserveError`.
+fn allocate_scratch(
+    n: usize,
+    blocks: &[u32],
     effective: usize,
-    max_length: usize,
-    clamp: Option<(u64, u64)>,
-    elapsed: std::time::Duration,
-) {
-    if effective < max_length {
-        if let Some((needed, budget)) = clamp {
+) -> Result<DpScratch, std::collections::TryReserveError> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("ANDLOCK_FORCE_PIPELINE_ERROR").is_some() {
+        let hostile = vec![1u32; 64 * 64];
+        return DpScratch::allocate(64, &hostile, 64);
+    }
+    DpScratch::allocate(n, blocks, effective)
+}
+
+/// Stderr footer: clamp explanation (when applicable) plus elapsed time.
+fn print_footer(outcome: RunOutcome, elapsed: std::time::Duration) {
+    match outcome {
+        RunOutcome::Clamped {
+            effective,
+            max_length,
+            needed,
+            budget,
+        } => {
             eprintln!(
                 "  Lengths {}–{} skipped — need {}, only {} available",
                 effective + 1,
@@ -282,9 +327,47 @@ fn print_footer(
                 HumanBytes(needed),
                 HumanBytes(budget),
             );
+            eprintln!("  Computed 0–{effective} of 0–{max_length} in {elapsed:.2?}");
         }
-        eprintln!("  Computed 0–{effective} of 0–{max_length} in {elapsed:.2?}");
-    } else {
-        eprintln!("  Counted in {elapsed:.2?}");
+        RunOutcome::Complete => {
+            eprintln!("  Counted in {elapsed:.2?}");
+        }
+    }
+}
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests {
+    use super::*;
+    use indicatif::{MultiProgress, ProgressDrawTarget};
+
+    /// `drive_dp` must surface allocator failures as an actionable
+    /// error that names both the byte estimate and the user-facing
+    /// remediation flags. We craft an `n` past the algorithm's normal
+    /// bound so `dp_layer_capacity` saturates and the underlying
+    /// `try_reserve_exact` rejects the request up front; the `?`
+    /// returns before the inner counter is invoked, so its own
+    /// preconditions are never asserted.
+    #[test]
+    fn drive_dp_propagates_allocator_failure_with_actionable_message() {
+        let mp = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+        let mut printer = LengthPrinter::new(&mp, 0, 64, false, None);
+        let blocks = vec![1u32; 64 * 64];
+        let dp = DpInputs {
+            n: 64,
+            blocks: &blocks,
+            effective: 64,
+        };
+
+        let err = drive_dp(dp, None, &mut printer).unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("could not allocate"),
+            "expected size-prefixed message, got: {msg}",
+        );
+        assert!(
+            msg.contains("--max-length") && msg.contains("--memory-limit"),
+            "expected remediation flags in: {msg}",
+        );
     }
 }
