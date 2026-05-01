@@ -18,6 +18,11 @@ sysinfo = { version = "0.38.4", default-features = false, features = [
     "system",
 ] }
 
+[dev-dependencies]
+assert_cmd = "2.2.1"
+predicates = "3.1.4"
+tempfile = "3.27.0"
+
 [lints.rust]
 unsafe_code = "forbid"
 warnings = "deny"
