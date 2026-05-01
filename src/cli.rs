@@ -555,13 +555,22 @@ fn render_final(
 /// from a one-shot probe of OS-reported available RAM (see
 /// [`detect_memory_budget`]).
 ///
+/// `unconstrained` short-circuits the clamp: an all-zero block matrix
+/// triggers the closed-form fast path inside [`count_patterns_dp`], which
+/// allocates no DP buffers, so no memory budget can ever justify
+/// truncating the run.
+///
 /// Returns `(effective, Some((needed_bytes, budget_bytes)))` when the cap
 /// is clamped, or `(max_length, None)` when it fits.
 fn resolve_memory_budget(
     n: usize,
     max_length: usize,
     memory_limit: Option<u64>,
+    unconstrained: bool,
 ) -> (usize, Option<(u64, u64)>) {
+    if unconstrained {
+        return (max_length, None);
+    }
     let budget = memory_limit.unwrap_or_else(detect_memory_budget);
     let effective = effective_max_length(n, max_length, budget);
     if effective < max_length {
@@ -606,11 +615,7 @@ fn run_pipeline(
     // it could trivially compute — e.g. `grid 0 -f 31` ran into the
     // 143 GiB DP estimate even though no DP would actually run.
     let unconstrained = blocks.iter().all(|&b| b == 0);
-    let (effective, clamp) = if unconstrained {
-        (max_length, None)
-    } else {
-        resolve_memory_budget(n, max_length, memory_limit)
-    };
+    let (effective, clamp) = resolve_memory_budget(n, max_length, memory_limit, unconstrained);
 
     // DP uses a single global bar with one tick per popcount-`p` bitmask
     // visited (`dp_mask_ticks(n, effective)` total). The bar is suppressed
@@ -856,6 +861,28 @@ mod tests {
             format_count(162_203_611_691_767_643, true),
             "162_203_611_691_767_643",
         );
+    }
+
+    // Regression test for the bug where an unconstrained run with many
+    // points was being clamped against the DP memory budget — even though
+    // the closed-form fast path inside `count_patterns_dp` never allocates
+    // the DP buffers. With 31 free points the DP estimate balloons to
+    // ~143 GiB, but the run itself should be effectively free.
+    #[test]
+    fn unconstrained_run_skips_memory_clamp_at_max_n() {
+        // A 1-byte budget is tighter than even the smallest DP layer, so
+        // `effective_max_length(31, 31, 1)` would normally collapse to 0.
+        let (effective, clamp) = resolve_memory_budget(31, 31, Some(1), true);
+        assert_eq!(effective, 31, "unconstrained run must not clamp max_length");
+        assert!(clamp.is_none(), "unconstrained run must not report a clamp");
+    }
+
+    // Sanity: with `unconstrained = false` the budget still clamps as before.
+    #[test]
+    fn constrained_run_still_respects_memory_clamp() {
+        let (effective, clamp) = resolve_memory_budget(31, 31, Some(1), false);
+        assert!(effective < 31, "tight budget must clamp constrained run");
+        assert!(clamp.is_some(), "clamp metadata must be reported");
     }
 
     #[test]
