@@ -211,6 +211,7 @@ fn divide_exact(coord: i32, divisor: i64) -> i32 {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use crate::counter::{DpScratch, count_patterns_dp};

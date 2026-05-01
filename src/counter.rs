@@ -555,6 +555,7 @@ fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::count_unconstrained;
     use super::*;

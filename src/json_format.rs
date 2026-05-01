@@ -58,6 +58,7 @@ fn format_value(value: &serde_json::Value, indent: usize) -> String {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
 

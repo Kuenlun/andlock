@@ -194,6 +194,7 @@ fn attach_free_points(rows: &mut [String], n_free: usize, grid_rows: usize) {
 }
 
 #[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
     use super::*;
     use andlock::grid::GridDefinition;

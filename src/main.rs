@@ -16,6 +16,9 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+// Allow `#[coverage(off)]` on test modules under `--cfg coverage_nightly` (nightly-only).
+#![cfg_attr(all(test, coverage_nightly), feature(coverage_attribute))]
+
 mod cli;
 mod json_format;
 mod preview;
