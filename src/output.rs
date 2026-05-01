@@ -22,28 +22,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 
+/// Width of the `Len` column in the result table. The table layout math
+/// in [`render_final`] derives every other width from this anchor.
+const LEN_COL_WIDTH: usize = 3;
+
 /// Bar style used for each per-length row of the live count table: just
 /// the message, no bar/spinner/percentage. Each row is its own
 /// `ProgressBar` so we can rewrite them in place when a wider count
 /// arrives and forces a column re-alignment.
 fn row_style() -> ProgressStyle {
     ProgressStyle::with_template("{msg}").unwrap_or_else(|_| ProgressStyle::default_bar())
-}
-
-/// Spinner style for short, indeterminate phases (e.g. building the
-/// block matrix): a dim spinner glyph followed by a status message.
-pub fn spinner_style() -> ProgressStyle {
-    ProgressStyle::with_template("  {spinner:.dim} {msg}")
-        .unwrap_or_else(|_| ProgressStyle::default_spinner())
-}
-
-/// Determinate bar style for the DP progress: message, cyan bar,
-/// percentage and ETA. `progress_chars` uses the heavy horizontal
-/// glyphs so the bar reads cleanly in monospace terminals.
-pub fn bar_style() -> ProgressStyle {
-    ProgressStyle::with_template("  {msg}  [{bar:40.cyan/dim}]  {percent}%  eta {eta}")
-        .unwrap_or_else(|_| ProgressStyle::default_bar())
-        .progress_chars("━━╌")
 }
 
 /// Renders a `u128` count for display. With `human = false` returns the
@@ -100,14 +88,18 @@ struct LivePrinter<'a> {
 }
 
 impl<'a> LengthPrinter<'a> {
+    /// Builds a printer that streams matching length rows above `anchor`
+    /// in `mp`, falling back to silent buffering when `anchor` is `None`
+    /// or hidden (quiet runs, non-TTY).
     pub fn new(
+        mp: &'a MultiProgress,
         min_length: usize,
         max_length: usize,
         human: bool,
         anchor: Option<&'a ProgressBar>,
     ) -> Self {
         let live = anchor.filter(|a| !a.is_hidden()).map(|anchor| LivePrinter {
-            mp: crate::tty::progress(),
+            mp,
             anchor,
             header_bar: None,
             row_bars: Vec::new(),
@@ -204,6 +196,14 @@ impl<'a> LengthPrinter<'a> {
     }
 }
 
+/// Final unified report: the length table, the `Total`/`Points`
+/// summary block, and the separator width that joins them visually.
+pub struct RenderedReport {
+    pub table: Vec<String>,
+    pub summary: Vec<String>,
+    pub separator_width: usize,
+}
+
 /// Renders the per-length table and the trailing summary (`Total` and
 /// `Points`) with a unified column layout: every value is right-aligned
 /// to the same column edge so the table and summary share a separator
@@ -219,49 +219,65 @@ pub fn render_final(
     human: bool,
     total_str: Option<&str>,
     points_str: &str,
-) -> (Vec<String>, Vec<String>, usize) {
+) -> RenderedReport {
+    // Each row is laid out as `<GUTTER><label/length><GAP><value>`, so a
+    // table row is `GUTTER + LEN_COL_WIDTH + GAP + value_w` wide and a
+    // summary row is `GUTTER + label.len() + GAP + value.len()`. The
+    // count column is grown so both shapes share the same right edge:
+    //     value_w >= value.len() + label.len() - LEN_COL_WIDTH
+    const GUTTER: usize = 2;
+    const GAP: usize = 2;
+    const COUNT_HEADER: &str = "Count";
+    const TOTAL_LABEL: &str = "Total";
+    const POINTS_LABEL: &str = "Points";
+
     let formatted: Vec<String> = entries
         .iter()
         .map(|(_, c)| format_count(*c, human))
         .collect();
 
-    // Length column is 3 wide; the count column grows so summary rows
-    // (whose labels are wider than 3) can right-align their values to
-    // the same edge as the table. For label `L` with value string `V`:
-    //   row_width = 2 + 3 + 2 + value_w   (table)
-    //             = 2 + L.len() + 2 + V.len()  (summary, exact)
-    // so value_w >= V.len() + L.len() - 3.
+    let summary_pad = |label: &str, value: &str| {
+        value
+            .len()
+            .saturating_add(label.len())
+            .saturating_sub(LEN_COL_WIDTH)
+    };
     let mut value_w = formatted
         .iter()
         .map(String::len)
         .max()
         .unwrap_or(0)
-        .max("Count".len());
+        .max(COUNT_HEADER.len());
     if let Some(s) = total_str {
-        value_w = value_w.max(s.len() + "Total".len() - 3);
+        value_w = value_w.max(summary_pad(TOTAL_LABEL, s));
     }
-    value_w = value_w.max(points_str.len() + "Points".len() - 3);
+    value_w = value_w.max(summary_pad(POINTS_LABEL, points_str));
 
-    let row_width = 2 + 3 + 2 + value_w;
+    let separator_width = GUTTER + LEN_COL_WIDTH + GAP + value_w;
+    let summary_value_width = |label: &str| separator_width - (GUTTER + label.len() + GAP);
 
     let mut table = Vec::new();
     if !entries.is_empty() {
         table.reserve_exact(entries.len() + 1);
-        table.push(format!("  Len  {:>value_w$}", "Count"));
+        table.push(format!("  Len  {COUNT_HEADER:>value_w$}"));
         for ((length, _), value) in entries.iter().zip(formatted.iter()) {
-            table.push(format!("  {length:>3}  {value:>value_w$}"));
+            table.push(format!("  {length:>LEN_COL_WIDTH$}  {value:>value_w$}"));
         }
     }
 
     let mut summary = Vec::new();
     if let Some(s) = total_str {
-        let w = row_width - (2 + "Total".len() + 2);
-        summary.push(format!("  Total  {s:>w$}"));
+        let w = summary_value_width(TOTAL_LABEL);
+        summary.push(format!("  {TOTAL_LABEL}  {s:>w$}"));
     }
-    let w = row_width - (2 + "Points".len() + 2);
-    summary.push(format!("  Points  {points_str:>w$}"));
+    let w = summary_value_width(POINTS_LABEL);
+    summary.push(format!("  {POINTS_LABEL}  {points_str:>w$}"));
 
-    (table, summary, row_width)
+    RenderedReport {
+        table,
+        summary,
+        separator_width,
+    }
 }
 
 #[cfg(test)]

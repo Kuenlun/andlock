@@ -24,39 +24,67 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
-use indicatif::{HumanBytes, ProgressBar};
+use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 
 use andlock::counter::{DpEvent, DpScratch, count_patterns_dp, dp_mask_ticks, dp_table_bytes};
 use andlock::grid::{GridDefinition, compute_blocks};
 
 use crate::memory::resolve_memory_budget;
-use crate::output::{LengthPrinter, bar_style, format_count, render_final, spinner_style};
+use crate::output::{LengthPrinter, RenderedReport, format_count, render_final};
+use crate::tty;
 
-pub fn run_pipeline(
-    grid: &GridDefinition,
-    min_length: usize,
-    max_length: usize,
-    memory_limit: Option<u64>,
-    quiet: bool,
-    human: bool,
-) -> Result<()> {
+/// Knobs that drive a single counting run. Grouped to keep
+/// [`run_pipeline`]'s signature stable as new flags land.
+#[derive(Copy, Clone)]
+pub struct RunOptions {
+    pub min_length: usize,
+    pub max_length: usize,
+    pub memory_limit: Option<u64>,
+    pub quiet: bool,
+    pub human: bool,
+}
+
+/// Spinner style for short, indeterminate phases (e.g. building the
+/// block matrix): a dim spinner glyph followed by a status message.
+fn spinner_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {spinner:.dim} {msg}")
+        .unwrap_or_else(|_| ProgressStyle::default_spinner())
+}
+
+/// Determinate bar style for the DP progress: message, cyan bar,
+/// percentage and ETA. `progress_chars` uses the heavy horizontal
+/// glyphs so the bar reads cleanly in monospace terminals.
+fn bar_style() -> ProgressStyle {
+    ProgressStyle::with_template("  {msg}  [{bar:40.cyan/dim}]  {percent}%  eta {eta}")
+        .unwrap_or_else(|_| ProgressStyle::default_bar())
+        .progress_chars("━━╌")
+}
+
+/// Runs the end-to-end counting pipeline for a single grid: builds the
+/// block matrix, resolves the active memory budget, allocates the DP
+/// scratch, drives the counter, and prints the unified
+/// table+summary+footer block.
+///
+/// # Errors
+/// Returns an error if the DP scratch allocation fails (the budget
+/// estimate is reported in the message so the user can adjust
+/// `--max-length` or `--memory-limit`).
+pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
+    let RunOptions {
+        min_length,
+        max_length,
+        memory_limit,
+        quiet,
+        human,
+    } = opts;
+
     let n = grid.points.len();
     let dim = grid.dimensions;
+    let mp = tty::progress();
 
-    // Block matrix
-    let block_pb = if quiet {
-        None
-    } else {
-        let pb = crate::tty::progress().add(ProgressBar::new_spinner());
-        pb.set_style(spinner_style());
-        pb.set_message(format!("Building block matrix ({n} points, {dim}D)"));
-        pb.enable_steady_tick(Duration::from_millis(80));
-        Some(pb)
-    };
-
+    let block_pb = build_block_spinner(mp, n, dim, quiet);
     let blocks = compute_blocks(grid);
-
-    if let Some(ref pb) = block_pb {
+    if let Some(pb) = block_pb {
         pb.finish_and_clear();
     }
 
@@ -68,88 +96,195 @@ pub fn run_pipeline(
     let unconstrained = blocks.iter().all(|&b| b == 0);
     let (effective, clamp) = resolve_memory_budget(n, max_length, memory_limit, unconstrained);
 
-    // DP uses a single global bar with one tick per popcount-`p` bitmask
-    // visited (`dp_mask_ticks(n, effective)` total). The bar is suppressed
-    // when no ticks will fire — both for `--quiet` and for trivially small
-    // caps (`effective < 2`) where the popcount loop never runs and an
-    // empty bar would otherwise flash on screen.
-    let dp_ticks = dp_mask_ticks(n, effective);
-    let count_pb: Option<ProgressBar> = if quiet || dp_ticks == 0 {
-        None
-    } else {
-        let mem_est = dp_table_bytes(n, effective);
-        let pb = crate::tty::progress().add(ProgressBar::new(dp_ticks));
-        pb.set_style(bar_style());
-        pb.set_message(format!("{n} points, ~{}", HumanBytes(mem_est)));
-        pb.enable_steady_tick(Duration::from_millis(80));
-        Some(pb)
-    };
+    let count_pb = build_dp_bar(mp, n, effective, quiet);
+    let mut printer = LengthPrinter::new(mp, min_length, effective, human, count_pb.as_ref());
 
-    // Per-length lines are printed the moment they are finalized so the
-    // user sees results live. The printer also retains them so we can
-    // size the trailing separator to the widest row.
-    let mut printer = LengthPrinter::new(min_length, effective, human, count_pb.as_ref());
+    let dp = DpInputs {
+        n,
+        blocks: &blocks,
+        effective,
+    };
     let t1 = Instant::now();
-    let mut scratch = DpScratch::allocate(n, &blocks, effective).map_err(|e| {
-        let needed = dp_table_bytes(n, effective);
-        anyhow!(
-            "could not allocate ~{} of RAM for the DP buffers: {e}. Lower --max-length or pass --memory-limit to clamp the run to a smaller cap.",
-            HumanBytes(needed)
-        )
-    })?;
-    let counts = count_patterns_dp(&mut scratch, n, &blocks, effective, |event| match event {
-        DpEvent::Mask => {
-            if let Some(ref pb) = count_pb {
-                pb.inc(1);
-            }
-        }
-        DpEvent::LengthDone { length, count } => printer.print(length, count),
-    });
+    let counts = drive_dp(dp, count_pb.as_ref(), &mut printer)?;
     let elapsed = t1.elapsed();
+
     // `finish` clears the live row/header bars in live mode (so the
     // region is empty before we paint the static block) and returns
     // the collected entries; `render_final` then produces a single
     // unified layout where the table and the `Total`/`Points` summary
     // rows share the same right-edge.
     let entries = printer.finish();
-
     if let Some(pb) = count_pb {
         pb.finish_and_clear();
     }
 
-    // A clamped run omits the total so partial counts stand on their own;
-    // the skip reason and elapsed time appear in the footer on stderr.
-    // `Points` qualifies the count so the user does not have to derive it
-    // from --max-length or the grid dimensions.
+    print_report(ReportInputs {
+        entries: &entries,
+        counts: &counts,
+        n,
+        min_length,
+        max_length,
+        effective,
+        human,
+    });
+    if !quiet {
+        print_footer(effective, max_length, clamp, elapsed);
+    }
+    Ok(())
+}
+
+/// Inputs the counter needs from the pipeline: the grid size `n`, the
+/// per-pair block matrix, and the resolved `effective` cap. Bundled so
+/// `drive_dp`'s signature stays narrow as the counter grows new knobs.
+#[derive(Copy, Clone)]
+struct DpInputs<'a> {
+    n: usize,
+    blocks: &'a [u32],
+    effective: usize,
+}
+
+/// Inputs needed to paint the final table+summary block: the run's
+/// raw outputs (`entries`, `counts`) plus the layout/length context
+/// the renderer formats them with.
+#[derive(Copy, Clone)]
+struct ReportInputs<'a> {
+    entries: &'a [(usize, u128)],
+    counts: &'a [u128],
+    n: usize,
+    min_length: usize,
+    max_length: usize,
+    effective: usize,
+    human: bool,
+}
+
+/// Spinner shown while `compute_blocks` builds the block matrix. `None`
+/// in quiet mode so the function still returns a uniform shape.
+fn build_block_spinner(
+    mp: &MultiProgress,
+    n: usize,
+    dim: usize,
+    quiet: bool,
+) -> Option<ProgressBar> {
+    if quiet {
+        return None;
+    }
+    let pb = mp.add(ProgressBar::new_spinner());
+    pb.set_style(spinner_style());
+    pb.set_message(format!("Building block matrix ({n} points, {dim}D)"));
+    pb.enable_steady_tick(Duration::from_millis(80));
+    Some(pb)
+}
+
+/// Determinate DP bar with one tick per popcount-`p` bitmask visited
+/// (`dp_mask_ticks(n, effective)` total). Suppressed both for `--quiet`
+/// and for trivially small caps (`effective < 2`) where no ticks fire
+/// and an empty bar would otherwise flash on screen.
+fn build_dp_bar(
+    mp: &MultiProgress,
+    n: usize,
+    effective: usize,
+    quiet: bool,
+) -> Option<ProgressBar> {
+    let dp_ticks = dp_mask_ticks(n, effective);
+    if quiet || dp_ticks == 0 {
+        return None;
+    }
+    let mem_est = dp_table_bytes(n, effective);
+    let pb = mp.add(ProgressBar::new(dp_ticks));
+    pb.set_style(bar_style());
+    pb.set_message(format!("{n} points, ~{}", HumanBytes(mem_est)));
+    pb.enable_steady_tick(Duration::from_millis(80));
+    Some(pb)
+}
+
+/// Allocates the DP scratch and runs the counter, forwarding mask
+/// ticks to `count_pb` and finalized lengths to `printer`.
+fn drive_dp(
+    dp: DpInputs<'_>,
+    count_pb: Option<&ProgressBar>,
+    printer: &mut LengthPrinter<'_>,
+) -> Result<Vec<u128>> {
+    let DpInputs {
+        n,
+        blocks,
+        effective,
+    } = dp;
+    let mut scratch = DpScratch::allocate(n, blocks, effective).map_err(|e| {
+        let needed = dp_table_bytes(n, effective);
+        anyhow!(
+            "could not allocate ~{} of RAM for the DP buffers: {e}. \
+             Lower --max-length or pass --memory-limit to clamp the run to a smaller cap.",
+            HumanBytes(needed)
+        )
+    })?;
+    Ok(count_patterns_dp(
+        &mut scratch,
+        n,
+        blocks,
+        effective,
+        |event| match event {
+            DpEvent::Mask => {
+                if let Some(pb) = count_pb {
+                    pb.inc(1);
+                }
+            }
+            DpEvent::LengthDone { length, count } => printer.print(length, count),
+        },
+    ))
+}
+
+/// Paints the unified table + separator + summary block on stdout.
+/// A clamped run omits the `Total` row so partial counts stand on
+/// their own; the skip reason and elapsed time appear in the footer
+/// on stderr. `Points` qualifies the count so the user does not have
+/// to derive it from `--max-length` or the grid dimensions.
+fn print_report(report: ReportInputs<'_>) {
+    let ReportInputs {
+        entries,
+        counts,
+        n,
+        min_length,
+        max_length,
+        effective,
+        human,
+    } = report;
     let total_str = (effective >= max_length)
         .then(|| format_count(counts[min_length..=effective].iter().sum(), human));
     let points_str = n.to_string();
-    let (table, summary, sep_width) =
-        render_final(&entries, human, total_str.as_deref(), &points_str);
+    let RenderedReport {
+        table,
+        summary,
+        separator_width,
+    } = render_final(entries, human, total_str.as_deref(), &points_str);
 
     for line in &table {
         println!("{line}");
     }
-    println!("{}", "─".repeat(sep_width));
+    println!("{}", "─".repeat(separator_width));
     for line in &summary {
         println!("{line}");
     }
+}
 
-    if !quiet {
-        if effective < max_length {
-            if let Some((needed, budget)) = clamp {
-                eprintln!(
-                    "  Lengths {}–{} skipped — need {}, only {} available",
-                    effective + 1,
-                    max_length,
-                    HumanBytes(needed),
-                    HumanBytes(budget),
-                );
-            }
-            eprintln!("  Computed 0–{effective} of 0–{max_length} in {elapsed:.2?}");
-        } else {
-            eprintln!("  Counted in {elapsed:.2?}");
+/// Stderr footer: clamp explanation (when applicable) plus elapsed time.
+fn print_footer(
+    effective: usize,
+    max_length: usize,
+    clamp: Option<(u64, u64)>,
+    elapsed: std::time::Duration,
+) {
+    if effective < max_length {
+        if let Some((needed, budget)) = clamp {
+            eprintln!(
+                "  Lengths {}–{} skipped — need {}, only {} available",
+                effective + 1,
+                max_length,
+                HumanBytes(needed),
+                HumanBytes(budget),
+            );
         }
+        eprintln!("  Computed 0–{effective} of 0–{max_length} in {elapsed:.2?}");
+    } else {
+        eprintln!("  Counted in {elapsed:.2?}");
     }
-    Ok(())
 }

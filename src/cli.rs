@@ -21,9 +21,15 @@ use std::io;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
-
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Args, Parser, Subcommand};
+
+use andlock::canonicalizer::canonicalize;
+use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
+
+use crate::json_format::pretty_compact_json;
+use crate::pipeline::{RunOptions, run_pipeline};
+use crate::preview::render_preview;
 
 // Cargo-like help colours: green headers, cyan flags. Degrades gracefully when NO_COLOR or non-TTY.
 const STYLES: Styles = Styles::styled()
@@ -70,12 +76,6 @@ Examples:
 
   andlock file grid.json --simplify --export-json
       Print the canonical form of a grid.";
-
-use crate::json_format::pretty_compact_json;
-use crate::pipeline::run_pipeline;
-use crate::preview::render_preview;
-use andlock::canonicalizer::canonicalize;
-use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
 
 /// Count Android-style unlock patterns on n-dimensional grids.
 ///
@@ -293,6 +293,8 @@ const fn io_kind_str(kind: io::ErrorKind) -> &'static str {
     }
 }
 
+/// Parses the command line and dispatches to the matching subcommand.
+///
 /// # Errors
 /// Propagates parse, I/O, and validation errors to the caller.
 pub fn run() -> Result<()> {
@@ -312,11 +314,7 @@ pub fn run() -> Result<()> {
             let grid = build_grid_definition(&parsed, free_points);
 
             if export_json {
-                if !quiet && (range.min_length.is_some() || range.max_length.is_some()) {
-                    eprintln!(
-                        "warning: --min-length and --max-length have no effect with --export-json"
-                    );
-                }
+                warn_ignored_range(&range, quiet);
                 println!("{}", pretty_compact_json(&grid)?);
                 return Ok(());
             }
@@ -329,11 +327,13 @@ pub fn run() -> Result<()> {
             }
             run_pipeline(
                 &grid,
-                min_length,
-                max_length,
-                memory.memory_limit,
-                quiet,
-                human,
+                RunOptions {
+                    min_length,
+                    max_length,
+                    memory_limit: memory.memory_limit,
+                    quiet,
+                    human,
+                },
             )?;
         }
         Command::File {
@@ -345,30 +345,12 @@ pub fn run() -> Result<()> {
             quiet,
             human,
         } => {
-            let stdin_sentinel = std::path::Path::new("-");
-            let (content, src_label) = if path == stdin_sentinel {
-                let text = io::read_to_string(io::stdin())
-                    .map_err(|e| anyhow!("could not read from stdin: {}", io_kind_str(e.kind())))?;
-                (text, "stdin".to_owned())
-            } else {
-                let text = fs::read_to_string(&path).map_err(|e| {
-                    anyhow!(
-                        "could not open file \"{}\": {}",
-                        path.display(),
-                        io_kind_str(e.kind())
-                    )
-                })?;
-                (text, format!("\"{}\"", path.display()))
-            };
+            let (content, src_label) = read_grid_source(&path)?;
             let grid: GridDefinition = serde_json::from_str(&content)
                 .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?;
 
             if export_json {
-                if !quiet && (range.min_length.is_some() || range.max_length.is_some()) {
-                    eprintln!(
-                        "warning: --min-length and --max-length have no effect with --export-json"
-                    );
-                }
+                warn_ignored_range(&range, quiet);
                 let out = if simplify { canonicalize(&grid) } else { grid };
                 println!("{}", pretty_compact_json(&out)?);
                 return Ok(());
@@ -382,16 +364,47 @@ pub fn run() -> Result<()> {
             }
             run_pipeline(
                 &grid,
-                min_length,
-                max_length,
-                memory.memory_limit,
-                quiet,
-                human,
+                RunOptions {
+                    min_length,
+                    max_length,
+                    memory_limit: memory.memory_limit,
+                    quiet,
+                    human,
+                },
             )?;
         }
     }
 
     Ok(())
+}
+
+/// Reads the grid source: stdin when `path == "-"`, otherwise the file
+/// at `path`. Returns the raw text and a human-readable label suitable
+/// for embedding in error messages.
+fn read_grid_source(path: &std::path::Path) -> Result<(String, String)> {
+    let stdin_sentinel = std::path::Path::new("-");
+    if path == stdin_sentinel {
+        let text = io::read_to_string(io::stdin())
+            .map_err(|e| anyhow!("could not read from stdin: {}", io_kind_str(e.kind())))?;
+        Ok((text, "stdin".to_owned()))
+    } else {
+        let text = fs::read_to_string(path).map_err(|e| {
+            anyhow!(
+                "could not open file \"{}\": {}",
+                path.display(),
+                io_kind_str(e.kind())
+            )
+        })?;
+        Ok((text, format!("\"{}\"", path.display())))
+    }
+}
+
+/// Emits the standard warning when `--export-json` is paired with a
+/// length flag that the export path ignores. Suppressed in `--quiet`.
+fn warn_ignored_range(range: &RangeArgs, quiet: bool) {
+    if !quiet && (range.min_length.is_some() || range.max_length.is_some()) {
+        eprintln!("warning: --min-length and --max-length have no effect with --export-json");
+    }
 }
 
 #[cfg(test)]
