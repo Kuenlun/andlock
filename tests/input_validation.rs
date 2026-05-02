@@ -144,3 +144,32 @@ fn json_with_too_many_points_reports_max_supported() {
         .failure()
         .stderr(contains("32 points exceeds the supported maximum of 31"));
 }
+
+#[test]
+fn file_subcommand_rejects_max_length_above_point_count() {
+    // Mirrors `max_length_above_point_count_is_rejected` for the file
+    // subcommand: the same length-validation path runs after the JSON
+    // parses cleanly, and must produce the documented error.
+    common::bin()
+        .args(["file", "-", "--max-length", "100"])
+        .write_stdin(r#"{"dimensions":2,"points":[[0,0],[1,0]]}"#)
+        .assert()
+        .failure()
+        .stderr(contains(
+            "--max-length (100) exceeds the number of points (2)",
+        ));
+}
+
+#[test]
+fn file_subcommand_reports_stdin_read_failure() {
+    // Invalid UTF-8 makes `io::read_to_string` return an `InvalidData`
+    // io error, which the binary turns into a user-facing message via
+    // the `io_kind_str` mapping. Pinning the wording locks the contract
+    // for shell scripts that grep stderr.
+    common::bin()
+        .args(["file", "-"])
+        .write_stdin(vec![0xFFu8, 0xFE, 0xFD])
+        .assert()
+        .failure()
+        .stderr(contains("could not read from stdin"));
+}

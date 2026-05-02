@@ -62,6 +62,37 @@ fn binary_unit_suffixes_all_parse() {
 }
 
 #[test]
+fn min_length_filter_with_zero_budget_emits_only_the_summary_block() {
+    // End-to-end: when `--memory-limit 0` clamps the effective max to 0
+    // and `--min-length 1` excludes the empty pattern, every length is
+    // filtered out. The CLI must still print the `Points` summary line,
+    // omit both the table and the `Total` row, and exit successfully.
+    let assert = bin()
+        .args([
+            "grid",
+            "3x3",
+            "--memory-limit",
+            "0",
+            "--min-length",
+            "1",
+            "--quiet",
+        ])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        parse_counts(&stdout).is_empty(),
+        "expected no length rows when every length is filtered out, got:\n{stdout}",
+    );
+    // No `Total` row (clamped run), but `Points` is always emitted.
+    assert_eq!(parse_total(&stdout), None);
+    assert!(
+        stdout.lines().any(|l| l.trim_start().starts_with("Points")),
+        "expected a Points summary line in:\n{stdout}",
+    );
+}
+
+#[test]
 fn generous_budget_matches_unconstrained_run() {
     let with_limit = bin()
         .args(["grid", "3x3", "--memory-limit", "1G", "--quiet"])

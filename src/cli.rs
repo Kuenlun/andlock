@@ -27,7 +27,7 @@ use clap::{Args, Parser, Subcommand};
 use andlock::canonicalizer::canonicalize;
 use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
 
-use crate::json_format::pretty_compact_json;
+use crate::json_format::pretty_compact_json_value;
 use crate::pipeline::{RunOptions, run_pipeline};
 use crate::preview::render_preview;
 
@@ -315,7 +315,7 @@ pub fn run() -> Result<()> {
 
             if export_json {
                 warn_ignored_range(&range, quiet);
-                println!("{}", pretty_compact_json(&grid)?);
+                println!("{}", pretty_compact_json_value(&grid_as_value(&grid)));
                 return Ok(());
             }
 
@@ -352,7 +352,7 @@ pub fn run() -> Result<()> {
             if export_json {
                 warn_ignored_range(&range, quiet);
                 let out = if simplify { canonicalize(&grid) } else { grid };
-                println!("{}", pretty_compact_json(&out)?);
+                println!("{}", pretty_compact_json_value(&grid_as_value(&out)));
                 return Ok(());
             }
 
@@ -376,6 +376,27 @@ pub fn run() -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Converts a [`GridDefinition`] into a [`serde_json::Value`] without
+/// going through the fallible [`serde_json::to_value`]. The raw fields
+/// (`usize` and `Vec<Vec<i32>>`) all have infallible `Into<Value>`
+/// impls, so this round-trips bit-for-bit identical JSON to the
+/// `Serialize`-derived path while letting the export path skip the
+/// `?` operator and its unreachable Err arm.
+fn grid_as_value(grid: &GridDefinition) -> serde_json::Value {
+    let points: Vec<serde_json::Value> = grid
+        .points
+        .iter()
+        .map(|p| serde_json::Value::Array(p.iter().map(|&n| serde_json::Value::from(n)).collect()))
+        .collect();
+    let mut obj = serde_json::Map::with_capacity(2);
+    obj.insert(
+        "dimensions".to_owned(),
+        serde_json::Value::from(grid.dimensions),
+    );
+    obj.insert("points".to_owned(), serde_json::Value::Array(points));
+    serde_json::Value::Object(obj)
 }
 
 /// Reads the grid source: stdin when `path == "-"`, otherwise the file
@@ -437,5 +458,59 @@ mod tests {
         assert!(parse_memory_size("-1").is_err());
         // u64 overflow on the multiplier
         assert!(parse_memory_size("999999999999T").is_err());
+    }
+
+    /// Error-kind labels are part of the CLI's user-visible diagnostics,
+    /// so the mapping must be exhaustive and stable for every kind
+    /// `read_grid_source` may surface. The integration tests already
+    /// pin the `NotFound` arm via a missing file; this table fixes the
+    /// remaining arms (and the catch-all) at the unit level so a future
+    /// reword is caught at compile time rather than as a regression in
+    /// the rendered error text.
+    #[test]
+    fn io_kind_str_labels_every_documented_kind() {
+        let cases: &[(io::ErrorKind, &str)] = &[
+            (io::ErrorKind::NotFound, "not found"),
+            (io::ErrorKind::PermissionDenied, "permission denied"),
+            (io::ErrorKind::AlreadyExists, "already exists"),
+            (io::ErrorKind::WouldBlock, "operation would block"),
+            (io::ErrorKind::InvalidInput, "invalid input"),
+            (io::ErrorKind::TimedOut, "timed out"),
+            (io::ErrorKind::WriteZero, "write zero"),
+            (io::ErrorKind::Interrupted, "interrupted"),
+            (io::ErrorKind::ConnectionRefused, "connection refused"),
+            (io::ErrorKind::ConnectionReset, "connection reset"),
+            (io::ErrorKind::ConnectionAborted, "connection aborted"),
+        ];
+        for &(kind, expected) in cases {
+            assert_eq!(io_kind_str(kind), expected, "kind = {kind:?}");
+        }
+    }
+
+    /// Any unmapped kind must fall through to the generic label rather
+    /// than panicking — `io::ErrorKind` is `#[non_exhaustive]`, so the
+    /// catch-all is the only forward-compatible default. `Unsupported`
+    /// is not in the explicit table above, so it exercises the `_` arm.
+    #[test]
+    fn io_kind_str_falls_back_to_generic_label_for_unmapped_kinds() {
+        assert_eq!(io_kind_str(io::ErrorKind::Unsupported), "I/O error");
+    }
+
+    /// `grid_as_value` is the export path's bridge between an
+    /// in-memory `GridDefinition` and `serde_json::Value`; its output
+    /// must round-trip through serde so the JSON wire format stays
+    /// identical to what the `Serialize` derive emits. We compare
+    /// against `serde_json::to_value(&grid)` rather than a hand-built
+    /// expectation so a future field addition fails the test loudly
+    /// instead of silently diverging the two paths.
+    #[test]
+    fn grid_as_value_matches_serde_to_value_output() {
+        let grid = GridDefinition {
+            dimensions: 3,
+            points: vec![vec![0, 1, 2], vec![3, 4, 5], vec![]],
+        };
+        let direct = grid_as_value(&grid);
+        let via_serde = serde_json::to_value(&grid).unwrap();
+        assert_eq!(direct, via_serde);
     }
 }

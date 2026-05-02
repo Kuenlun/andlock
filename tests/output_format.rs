@@ -125,3 +125,110 @@ fn output_ends_with_single_trailing_newline() {
         "stdout must not end with a blank line"
     );
 }
+
+#[test]
+fn file_subcommand_renders_preview_when_not_quiet() {
+    // The File arm's preview branch is symmetric to the Grid arm's:
+    // when stdout is interactive and `render_preview` produces output,
+    // the binary prints it before the table. We feed a 3×3 grid via
+    // stdin and assert on the preview glyph the renderer emits.
+    let assert = bin()
+        .args(["file", "-"])
+        .write_stdin(
+            r#"{"dimensions":2,"points":[[0,0],[1,0],[2,0],[0,1],[1,1],[2,1],[0,2],[1,2],[2,2]]}"#,
+        )
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains('●'),
+        "file subcommand should emit the grid preview when not --quiet:\n{stdout}"
+    );
+}
+
+#[test]
+fn export_json_paired_with_length_flag_warns_on_stderr() {
+    // `--export-json` ignores `--min-length` and `--max-length`; the
+    // user-visible warning is part of the documented contract for
+    // accidental flag pairing. `--quiet` suppresses it (already pinned
+    // by `memory_limit::zero_budget_keeps_only_the_empty_pattern`).
+    let assert = bin()
+        .args(["grid", "3x3", "--export-json", "--min-length", "4"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("--min-length and --max-length have no effect with --export-json"),
+        "expected warning on stderr, got: {stderr}",
+    );
+}
+
+#[test]
+fn export_json_quiet_suppresses_ignored_range_warning() {
+    // Symmetric guard for the suppression branch of the same warning.
+    let assert = bin()
+        .args([
+            "grid",
+            "3x3",
+            "--export-json",
+            "--max-length",
+            "4",
+            "--quiet",
+        ])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.is_empty(),
+        "--quiet must suppress the ignored-range warning, got: {stderr}"
+    );
+}
+
+#[test]
+fn export_json_with_only_max_length_still_warns() {
+    // The ignored-range warning fires whenever either length flag is set,
+    // not only when `--min-length` is. Without this case the `||` short-
+    // circuits on the `min_length` branch and the `max_length` arm of the
+    // condition is never evaluated to true.
+    let assert = bin()
+        .args(["grid", "3x3", "--export-json", "--max-length", "4"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("--min-length and --max-length have no effect with --export-json"),
+        "expected warning on stderr when only --max-length is set, got: {stderr}",
+    );
+}
+
+#[test]
+fn grid_subcommand_skips_preview_for_high_dimensional_grids() {
+    // 3D base grids fall outside `render_preview`'s supported shapes, so
+    // the helper returns `None`. Without `--quiet` the binary must still
+    // succeed and emit no preview glyph — exercising the False arm of
+    // the `let Some(preview)` guard in the Grid subcommand.
+    let assert = bin().args(["grid", "2x2x2"]).assert().success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        !stdout.contains('●') && !stdout.contains('★'),
+        "3D grid must skip the preview block:\n{stdout}",
+    );
+}
+
+#[test]
+fn file_subcommand_skips_preview_for_high_dimensional_grids() {
+    // Mirror of the Grid case for the File arm: a 3D grid loaded from
+    // JSON without `--quiet` must succeed and produce no preview.
+    let assert = bin()
+        .args(["file", "-"])
+        .write_stdin(
+            r#"{"dimensions":3,"points":[[0,0,0],[1,0,0],[0,1,0],[0,0,1],[1,1,0],[1,0,1],[0,1,1],[1,1,1]]}"#,
+        )
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
+    assert!(
+        !stdout.contains('●') && !stdout.contains('★'),
+        "3D grid loaded from JSON must skip the preview:\n{stdout}",
+    );
+}

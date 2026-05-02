@@ -66,13 +66,61 @@ fn missing_dims_argument_fails_with_clap_exit_code() {
 #[test]
 fn install_handler_failure_propagates_through_main() {
     // Other integration tests cover the Ok path when they spawn the binary;
-    // this one forces the Err branch so `main`'s `?` propagation is exercised.
+    // this one forces the Err branch by pre-registering a dummy ctrlc
+    // handler so the real `set_handler` returns `MultipleHandlers`. The
+    // resulting error has to reach stderr through `main`'s `?`.
     common::bin()
         .env("ANDLOCK_FORCE_HANDLER_ERROR", "1")
         .args(["grid", "3x3", "--quiet"])
         .assert()
         .failure()
-        .stderr(contains("simulated handler error"));
+        .stderr(contains("handler"));
+}
+
+#[test]
+fn sigint_hatch_runs_cleanup_then_propagates_through_main() {
+    // The debug hatch executes the cleanup body and bails through
+    // `main`'s `?` instead of calling `process::exit(SIGINT_EXIT_CODE)`
+    // — see the coverage note on `tty::handle_sigint`. So the
+    // observable contract from this subprocess is anyhow's standard
+    // failure path: non-zero exit plus the cleanup marker on stderr.
+    // The real 128+SIGINT exit code belongs to `handle_sigint`, which
+    // no portable test driver can trigger.
+    common::bin()
+        .env("ANDLOCK_FORCE_SIGINT_HANDLER", "1")
+        .assert()
+        .failure()
+        .stderr(contains("simulated sigint cleanup"));
+}
+
+#[test]
+fn pipeline_error_propagates_from_grid_subcommand() {
+    // Grid arm: a failure inside `run_pipeline` must surface through
+    // the `?` operator with the actionable scratch-alloc message
+    // intact. The debug-only hatch hijacks `allocate_scratch` to
+    // synthesize a real `TryReserveError`, exercising the full
+    // failure path — `map_err` closure, `?`, and propagation up to
+    // `cli::run` — exactly as a genuine OOM would.
+    common::bin()
+        .env("ANDLOCK_FORCE_PIPELINE_ERROR", "1")
+        .args(["grid", "3x3", "--quiet"])
+        .assert()
+        .failure()
+        .stderr(contains("could not allocate"))
+        .stderr(contains("--max-length"));
+}
+
+#[test]
+fn pipeline_error_propagates_from_file_subcommand() {
+    // File arm: same propagation contract as the grid arm — the
+    // failure must reach stderr and exit non-zero, not be swallowed.
+    common::bin()
+        .env("ANDLOCK_FORCE_PIPELINE_ERROR", "1")
+        .args(["file", "-", "--quiet"])
+        .write_stdin(r#"{"dimensions":2,"points":[[0,0]]}"#)
+        .assert()
+        .failure()
+        .stderr(contains("could not allocate"));
 }
 
 #[test]
