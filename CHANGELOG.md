@@ -7,6 +7,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/Kuenlun/andlock/compare/v0.2.1...v0.3.0) - 2026-05-02
+
+### Added
+
+- *(cli)* unify run summary layout with --human and points line ([#27](https://github.com/Kuenlun/andlock/pull/27))
+- *(cli)* [**breaking**] clamp max-length to memory budget via sysinfo auto-detection ([#25](https://github.com/Kuenlun/andlock/pull/25))
+- *(cli)* [**breaking**] expose --algorithm and --memory-limit, drop sysinfo polling ([#22](https://github.com/Kuenlun/andlock/pull/22))
+- *(signal)* handle Ctrl+C cleanly via shared MultiProgress ([#15](https://github.com/Kuenlun/andlock/pull/15))
+- *(counter)* add memory-aware IDDFS counter and lift node limit to 31 ([#14](https://github.com/Kuenlun/andlock/pull/14))
+- *(dp)* stream per-length counts as they are finalized during DP traversal ([#12](https://github.com/Kuenlun/andlock/pull/12))
+
+### Fixed
+
+- *(cli)* skip memory clamp when block matrix is unconstrained ([#29](https://github.com/Kuenlun/andlock/pull/29))
+- *(cli)* warn instead of error when range flags combine with --export-json ([#18](https://github.com/Kuenlun/andlock/pull/18))
+
+### Other
+
+- enforce 100% coverage including branches in pre-commit hook ([#35](https://github.com/Kuenlun/andlock/pull/35))
+- *(cli)* expand unit and subprocess coverage of the binary surface ([#34](https://github.com/Kuenlun/andlock/pull/34))
+- *(cli)* split into memory, output, pipeline, and tty modules ([#33](https://github.com/Kuenlun/andlock/pull/33))
+- *(counter)* hoist dp allocation and expand coverage tooling ([#32](https://github.com/Kuenlun/andlock/pull/32))
+- *(cli)* add integration coverage for the binary surface ([#31](https://github.com/Kuenlun/andlock/pull/31))
+- *(release)* optimize binaries and broaden ci target matrix ([#30](https://github.com/Kuenlun/andlock/pull/30))
+- *(prompts)* persist commit and PR drafts to repo-root files ([#28](https://github.com/Kuenlun/andlock/pull/28))
+- *(cli)* split help into terse `-h` and detailed `--help` views ([#26](https://github.com/Kuenlun/andlock/pull/26))
+- *(counter)* replace O(p) colex_rank with O(1) prefix/suffix sums ([#24](https://github.com/Kuenlun/andlock/pull/24))
+- [**breaking**] drop IDDFS and make DP the sole counting algorithm ([#23](https://github.com/Kuenlun/andlock/pull/23))
+- *(counter)* assert DP monotonicity for 4x4 plus 5 free points ([#21](https://github.com/Kuenlun/andlock/pull/21))
+- *(counter)* switch DP to layered storage with packed endpoints ([#20](https://github.com/Kuenlun/andlock/pull/20))
+- *(prompts)* add commit-builder and changelog-update, harden pr-builder ([#16](https://github.com/Kuenlun/andlock/pull/16))
+- *(cli)* apply coloured help output via clap styling API ([#19](https://github.com/Kuenlun/andlock/pull/19))
+- *(cli)* align --help text with actual runtime behaviour for dims, free-points, quiet, and preview ([#17](https://github.com/Kuenlun/andlock/pull/17))
+
 ## [0.2.1](https://github.com/Kuenlun/andlock/compare/v0.2.0...v0.2.1) - 2026-04-19
 
 ### Added
