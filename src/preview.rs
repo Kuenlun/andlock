@@ -243,6 +243,23 @@ mod tests {
         assert_eq!(detect_free_dims(&g), 1);
     }
 
+    #[test]
+    fn detect_free_dims_rejects_axis_with_extra_non_zero_value() {
+        // Trailing axis carries one `1` and one other non-zero value:
+        // `ones == 1` is true but `non_zeros == 1` is false, so the axis
+        // is not a free-point dimension and the scan stops at zero.
+        #[rustfmt::skip]
+        let g = grid(
+            2,
+            vec![
+                vec![0, 0],
+                vec![0, 1],
+                vec![0, 2],
+            ],
+        );
+        assert_eq!(detect_free_dims(&g), 0);
+    }
+
     // --- render_preview: None cases ---
 
     #[test]

@@ -517,6 +517,22 @@ mod tests {
         assert_eq!(entries, vec![(0, 1), (9, 140_704)]);
     }
 
+    /// Pins the True arm of every clause in `print`'s filter chain — the
+    /// `length < min_length`, `length > max_length`, and `count == 0`
+    /// short-circuits — using the unit-test instantiation. The other
+    /// tests in this module run with `min_length = 0`, so the lower
+    /// bound's True arm is unreachable from them.
+    #[test]
+    fn length_printer_filter_chain_drops_each_excluded_input() {
+        let mp = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
+        let mut printer = LengthPrinter::new(&mp, 4, 9, false, None);
+        printer.print(3, 1); // length < min_length → True arm of first clause
+        printer.print(10, 1); // length > max_length → True arm of second clause
+        printer.print(5, 0); // count == 0 → True arm of third clause
+        printer.print(5, 1); // accepted
+        assert_eq!(printer.finish(), vec![(5, 1)]);
+    }
+
     /// `render_lines` returns an empty vector before any row matches so
     /// callers do not paint an orphan header. This matches the buffered
     /// (non-live) shape of the printer, which the integration tests
