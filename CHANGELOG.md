@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0](https://github.com/Kuenlun/andlock/compare/v0.2.1...v0.3.0) - 2026-05-02
+
+### Added
+
+- Add `aarch64-unknown-linux-musl` and `aarch64-pc-windows-msvc` to the prebuilt release-binary matrix, broadening Linux ARM and Windows ARM coverage alongside the existing `x86_64-pc-windows-msvc`, `x86_64-apple-darwin`, and `aarch64-apple-darwin` targets ([#30](https://github.com/Kuenlun/andlock/pull/30))
+- Add `--human` flag to the `grid` and `file` subcommands for `_`-grouped digits (every three digits) on the per-length, `Total`, and `Points` rows, matching Rust integer-literal syntax for locale-neutral output ([#27](https://github.com/Kuenlun/andlock/pull/27))
+- Add `--memory-limit SIZE` to the `grid` and `file` subcommands, accepting case-insensitive K/M/G/T binary suffixes (e.g., `512M`, `2GiB`). When omitted, the budget defaults to 80% of available RAM detected via `sysinfo`, and `--max-length` is clamped to the largest cap that fits the resulting DP allocation, with a stderr warning listing the skipped lengths and the needed versus available bytes ([#25](https://github.com/Kuenlun/andlock/pull/25))
+- Apply coloured `--help` output via clap's styling API, with bold-underline green section headers and usage, bold cyan flag literals, and cyan placeholders, automatically degrading on restricted terminals ([#19](https://github.com/Kuenlun/andlock/pull/19))
+- Handle `Ctrl+C` cleanly via a shared `MultiProgress` draw target, restoring the stderr cursor and exiting with status 130 on Unix or 1 elsewhere to avoid Cargo's red `STATUS_CONTROL_C_EXIT` banner ([#15](https://github.com/Kuenlun/andlock/pull/15))
+- Stream per-length counts live as they are finalized during DP traversal, replacing the batch end-of-run output with progressive feedback that arrives the moment each popcount layer completes ([#12](https://github.com/Kuenlun/andlock/pull/12))
+
+### Changed
+
+- **BREAKING:** Change `count_patterns_dp` to accept a pre-allocated `DpScratch` buffer as its first parameter, with all heap allocations hoisted into `DpScratch::allocate(n, blocks, max_length) -> Result<DpScratch, TryReserveError>` so callers surface allocation failures up front and the DP body itself stays infallible ([#32](https://github.com/Kuenlun/andlock/pull/32))
+- Tighten the release profile with `opt-level = 3`, `lto = "fat"`, `codegen-units = 1`, `panic = "abort"`, `strip = "debuginfo"`, and `debug = false` for smaller, faster published binaries, plus per-target `RUSTFLAGS` setting `target-cpu=x86-64-v3` on x86_64 targets and `target-cpu=apple-m1` on `aarch64-apple-darwin` ([#30](https://github.com/Kuenlun/andlock/pull/30))
+- Switch the Linux release binary from `x86_64-unknown-linux-gnu` to `x86_64-unknown-linux-musl` to ship a portable, statically linked artifact ([#30](https://github.com/Kuenlun/andlock/pull/30))
+- Replace the per-row `Length N:` prefix with a `Len Count` two-column header rendered lazily on the first matching row, add a `Points N` row to the run summary so the grid size remains visible when `--max-length` truncates the per-length list, and right-align the per-length, `Total`, and `Points` rows to a single shared column edge sized from the widest formatted count ([#27](https://github.com/Kuenlun/andlock/pull/27))
+- Split `--help` into a terse one-line `-h` view and a detailed `--help` view via clap's doc-comment two-tier convention, group flags under `Pattern length`, `Resources`, and `Output` headings, and move curated examples behind `--help` only via `after_long_help` ([#26](https://github.com/Kuenlun/andlock/pull/26))
+- Replace the O(p) `colex_rank` walk inside the DP transition with O(1) prefix and suffix sums of the `BINOM` table, computing each destination-layer index as a constant-time three-term lookup precomputed once per source mask ([#24](https://github.com/Kuenlun/andlock/pull/24))
+- Switch the DP table from a flat `2ⁿ × n × u128` layout to two adjacent popcount layers with packed endpoints (indexing each popcount-`p` mask into `p` `u128` slots via `popcount(mask & (bit - 1))`), cutting peak DP memory by roughly 6x without changing asymptotic cost so larger grids fit on modest hardware ([#20](https://github.com/Kuenlun/andlock/pull/20))
+- **BREAKING:** Rename the public library module `andlock::dp` to `andlock::counter`, with all public DP types and functions now reachable under the new path ([#14](https://github.com/Kuenlun/andlock/pull/14))
+- Raise the maximum supported point count from 25 to 31, with the `u32` visited-set bitmask now the limiting factor instead of the DP table size ([#14](https://github.com/Kuenlun/andlock/pull/14))
+- **BREAKING:** Replace the `impl Fn()` mask-tick callback in `count_patterns_dp` with `F: FnMut(DpEvent)`, where `DpEvent` is a new public enum with `Mask` and `LengthDone { length, count }` variants threading both progress ticks and finalized per-length results through a single closure ([#12](https://github.com/Kuenlun/andlock/pull/12))
+
+### Fixed
+
+- Skip the memory clamp when the block matrix is fully unconstrained (all-zero blocks), since `count_patterns_dp` takes a closed-form fast path that allocates no DP buffers. Cases like `andlock grid 0 -f 31` no longer truncate `--max-length` against a phantom 143 GiB estimate ([#29](https://github.com/Kuenlun/andlock/pull/29))
+- Warn on stderr instead of erroring when `--min-length` or `--max-length` is combined with `--export-json`, so scripts that pass a uniform flag set across subcommands no longer abort. The warning is suppressed under `--quiet`, and the JSON payload on stdout is unchanged ([#18](https://github.com/Kuenlun/andlock/pull/18))
+- Correct the `--help` text on both subcommands so it matches actual runtime behaviour: `parse_dims` accepts both `x` and `X` as separators with no surrounding whitespace, each `--free-points` adds an extra non-collinear axis, `--quiet` also suppresses the ASCII grid preview, and the preview itself is only rendered for 1D/2D grids fitting roughly 40x20 cells ([#17](https://github.com/Kuenlun/andlock/pull/17))
+
 ## [0.2.1](https://github.com/Kuenlun/andlock/compare/v0.2.0...v0.2.1) - 2026-04-19
 
 ### Added
