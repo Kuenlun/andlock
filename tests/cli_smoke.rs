@@ -78,17 +78,19 @@ fn install_handler_failure_propagates_through_main() {
 }
 
 #[test]
-fn sigint_handler_runs_cleanup_and_exits_with_sigint_code() {
-    // Subprocess test for the SIGINT cleanup path: the debug-only escape
-    // hatch invokes the registered handler synchronously so the cleanup
-    // body executes and `process::exit` lands on the documented code.
-    // 130 = 128 + SIGINT on Unix; 1 elsewhere (Cargo flags only the
-    // STATUS_CONTROL_C_EXIT magic on Windows, so any non-zero is fine).
-    let expected = if cfg!(unix) { 130 } else { 1 };
+fn sigint_hatch_runs_cleanup_then_propagates_through_main() {
+    // The debug hatch executes the cleanup body and bails through
+    // `main`'s `?` instead of calling `process::exit(SIGINT_EXIT_CODE)`
+    // — see the coverage note on `tty::handle_sigint`. So the
+    // observable contract from this subprocess is anyhow's standard
+    // failure path: non-zero exit plus the cleanup marker on stderr.
+    // The real 128+SIGINT exit code belongs to `handle_sigint`, which
+    // no portable test driver can trigger.
     common::bin()
         .env("ANDLOCK_FORCE_SIGINT_HANDLER", "1")
         .assert()
-        .code(expected);
+        .failure()
+        .stderr(contains("simulated sigint cleanup"));
 }
 
 #[test]
