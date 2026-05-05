@@ -45,20 +45,26 @@ pub struct RunOptions {
 }
 
 /// Spinner style for short, indeterminate phases (e.g. building the
-/// block matrix): a dim spinner glyph followed by a status message.
+/// block matrix). Mirrors cargo's status-line layout: a 12-column
+/// right-aligned bold-cyan verb (set via `set_prefix`), then a spinner
+/// and the per-bar message.
 fn spinner_style() -> ProgressStyle {
-    style_or_default("  {spinner:.dim} {msg}", ProgressStyle::default_spinner)
+    style_or_default(
+        "{prefix:>12.cyan.bold} {spinner} {wide_msg}",
+        ProgressStyle::default_spinner,
+    )
 }
 
-/// Determinate bar style for the DP progress: message, cyan bar,
-/// percentage and ETA. `progress_chars` uses the heavy horizontal
-/// glyphs so the bar reads cleanly in monospace terminals.
+/// Determinate bar style for the DP progress, modelled on cargo's
+/// build-progress bar: a 12-column right-aligned bold-cyan verb prefix,
+/// a 57-wide bracketed bar drawn with `=`/`>`/space, and the per-bar
+/// message.
 fn bar_style() -> ProgressStyle {
     style_or_default(
-        "  {msg}  [{bar:40.cyan/dim}]  {percent}%  eta {eta}",
+        "{prefix:>12.cyan.bold} [{bar:57}] {wide_msg}",
         ProgressStyle::default_bar,
     )
-    .progress_chars("━━╌")
+    .progress_chars("=> ")
 }
 
 /// Runs the end-to-end counting pipeline for a single grid: builds the
@@ -180,7 +186,8 @@ fn build_block_spinner(
     }
     let pb = mp.add(ProgressBar::new_spinner());
     pb.set_style(spinner_style());
-    pb.set_message(format!("Building block matrix ({n} points, {dim}D)"));
+    pb.set_prefix("Building");
+    pb.set_message(format!("block matrix ({n} points, {dim}D)"));
     pb.enable_steady_tick(Duration::from_millis(80));
     Some(pb)
 }
@@ -202,6 +209,7 @@ fn build_dp_bar(
     let mem_est = dp_table_bytes(n, effective);
     let pb = mp.add(ProgressBar::new(dp_ticks));
     pb.set_style(bar_style());
+    pb.set_prefix("Counting");
     pb.set_message(format!("{n} points, ~{}", HumanBytes(mem_est)));
     pb.enable_steady_tick(Duration::from_millis(80));
     Some(pb)
