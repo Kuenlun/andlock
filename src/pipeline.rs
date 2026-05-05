@@ -55,13 +55,12 @@ fn spinner_style() -> ProgressStyle {
     )
 }
 
-/// Determinate bar style for the DP progress, modelled on cargo's
-/// build-progress bar: a 12-column right-aligned bold-cyan verb prefix,
-/// a 57-wide bracketed bar drawn with `=`/`>`/space, and the per-bar
-/// message.
+/// Determinate bar style for the DP progress: a 12-column right-aligned
+/// bold-cyan verb prefix, a fixed 27-column bracketed bar drawn with
+/// `=`/`>`/space, the per-bar message, and an ETA tail.
 fn bar_style() -> ProgressStyle {
     style_or_default(
-        "{prefix:>12.cyan.bold} [{bar:57}] {wide_msg}",
+        "{prefix:>12.cyan.bold} [{bar:27}] {msg}  eta {eta}",
         ProgressStyle::default_bar,
     )
     .progress_chars("=> ")
