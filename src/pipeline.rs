@@ -24,6 +24,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
+use console::style;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 
 use andlock::counter::{DpEvent, DpScratch, count_patterns_dp, dp_mask_ticks, dp_table_bytes};
@@ -102,6 +103,10 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
     let unconstrained = blocks.iter().all(|&b| b == 0);
     let (effective, clamp) = resolve_memory_budget(n, max_length, memory_limit, unconstrained);
 
+    if !quiet && let Some((needed, budget)) = clamp {
+        print_clamp_warning(effective, needed, budget);
+    }
+
     let count_pb = build_dp_bar(mp, n, effective, quiet);
     let mut printer = LengthPrinter::new(mp, min_length, effective, human, count_pb.as_ref());
 
@@ -135,17 +140,28 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
     });
     if !quiet {
         let outcome = match clamp {
-            Some((needed, budget)) => RunOutcome::Clamped {
-                effective,
-                max_length,
-                needed,
-                budget,
-            },
+            Some(_) => RunOutcome::Clamped { effective },
             None => RunOutcome::Complete,
         };
         print_footer(outcome, elapsed);
     }
     Ok(())
+}
+
+/// Prints the memory-clamp warning to stderr at the start of the run so
+/// the user learns the cap before the DP begins, rather than discovering
+/// it only when the run finishes. Uses the bold-yellow `warning:` prefix
+/// that rustc, clippy, and cargo all share, and names the equivalent
+/// `--max-length` value inline so the user can re-run with the same cap
+/// declared explicitly.
+fn print_clamp_warning(effective: usize, needed: u64, budget: u64) {
+    let warn = style("warning:").yellow().bold();
+    eprintln!(
+        "{warn} insufficient memory, run limited to --max-length {effective} \
+         (need {}, only {} available)",
+        HumanBytes(needed),
+        HumanBytes(budget),
+    );
 }
 
 /// Inputs the counter needs from the pipeline: the grid size `n`, the
@@ -209,13 +225,28 @@ fn build_dp_bar(
     let pb = mp.add(ProgressBar::new(dp_ticks));
     pb.set_style(bar_style());
     pb.set_prefix("Counting");
-    pb.set_message(format!("{n} points, ~{}", HumanBytes(mem_est)));
+    pb.set_message(dp_progress_message(effective.min(1), effective, n, mem_est));
     pb.enable_steady_tick(Duration::from_millis(80));
     Some(pb)
 }
 
+/// Renders the DP bar's message, foregrounding the three numbers the
+/// user cares about most while a long run is in flight: the length
+/// currently being computed, the cap the run will reach, and the total
+/// number of points the grid carries. The peak DP allocation trails the
+/// length info so the user can see at a glance how much memory the
+/// chosen cap commits to.
+fn dp_progress_message(current: usize, effective: usize, n: usize, mem_bytes: u64) -> String {
+    format!(
+        "length {current} of {effective}, {n} points, ~{}",
+        HumanBytes(mem_bytes),
+    )
+}
+
 /// Allocates the DP scratch and runs the counter, forwarding mask
-/// ticks to `count_pb` and finalized lengths to `printer`.
+/// ticks to `count_pb` and finalized lengths to `printer`. Each
+/// `LengthDone` also rewrites the bar's message so the "length X of Y"
+/// counter advances in lock-step with the underlying DP.
 fn drive_dp(
     dp: DpInputs<'_>,
     count_pb: Option<&ProgressBar>,
@@ -226,12 +257,12 @@ fn drive_dp(
         blocks,
         effective,
     } = dp;
+    let mem_est = dp_table_bytes(n, effective);
     let mut scratch = allocate_scratch(n, blocks, effective).map_err(|e| {
-        let needed = dp_table_bytes(n, effective);
         anyhow!(
             "could not allocate ~{} of RAM for the DP buffers: {e}. \
              Lower --max-length or pass --memory-limit to clamp the run to a smaller cap.",
-            HumanBytes(needed)
+            HumanBytes(mem_est)
         )
     })?;
     Ok(count_patterns_dp(
@@ -245,7 +276,13 @@ fn drive_dp(
                     pb.inc(1);
                 }
             }
-            DpEvent::LengthDone { length, count } => printer.print(length, count),
+            DpEvent::LengthDone { length, count } => {
+                printer.print(length, count);
+                if let Some(pb) = count_pb {
+                    let next = (length + 1).min(effective);
+                    pb.set_message(dp_progress_message(next, effective, n, mem_est));
+                }
+            }
         },
     ))
 }
@@ -284,19 +321,13 @@ fn print_report(report: ReportInputs<'_>) {
 }
 
 /// Outcome of a finished run, paired with the data the footer needs to
-/// describe it. Pairing the clamped lengths with the byte estimates in a
-/// single variant prevents a partial state — a `Clamped` outcome is
-/// guaranteed to carry both — so `print_footer` does not need a defensive
-/// inner check.
+/// describe it. The `Clamped` variant carries the effective cap so the
+/// footer can re-state it as a closing reminder of the partial nature
+/// of the run, mirroring the up-front `warning:` line.
 #[derive(Copy, Clone)]
 enum RunOutcome {
     Complete,
-    Clamped {
-        effective: usize,
-        max_length: usize,
-        needed: u64,
-        budget: u64,
-    },
+    Clamped { effective: usize },
 }
 
 /// Wraps [`DpScratch::allocate`] so subprocess tests can drive the
@@ -321,20 +352,8 @@ fn allocate_scratch(
 /// Stderr footer: clamp explanation (when applicable) plus elapsed time.
 fn print_footer(outcome: RunOutcome, elapsed: std::time::Duration) {
     match outcome {
-        RunOutcome::Clamped {
-            effective,
-            max_length,
-            needed,
-            budget,
-        } => {
-            eprintln!(
-                "  Lengths {}–{} skipped — need {}, only {} available",
-                effective + 1,
-                max_length,
-                HumanBytes(needed),
-                HumanBytes(budget),
-            );
-            eprintln!("  Computed 0–{effective} of 0–{max_length} in {elapsed:.2?}");
+        RunOutcome::Clamped { effective } => {
+            eprintln!("  Counted up to length {effective} in {elapsed:.2?}");
         }
         RunOutcome::Complete => {
             eprintln!("  Counted in {elapsed:.2?}");
@@ -375,6 +394,29 @@ mod tests {
         assert!(
             msg.contains("--max-length") && msg.contains("--memory-limit"),
             "expected remediation flags in: {msg}",
+        );
+    }
+
+    /// The DP bar message is the user's primary signal for what the run
+    /// is doing while it is in flight, so its layout is part of the
+    /// public contract: the currently-computed length, the cap it will
+    /// reach, the total point count, and the peak DP allocation must
+    /// all appear, in that order, separated by commas. Pinning the
+    /// shape here keeps a stylistic refactor from silently regressing
+    /// the user-facing copy that integration tests do not assert on.
+    #[test]
+    fn dp_progress_message_carries_length_total_and_memory_in_order() {
+        let msg = dp_progress_message(9, 13, 27, 6_682_111_672);
+        assert!(
+            msg.starts_with("length 9 of 13"),
+            "current and effective lengths must lead the message, got: {msg}",
+        );
+        let length_idx = msg.find("length 9 of 13").unwrap();
+        let points_idx = msg.find("27 points").expect("points segment missing");
+        let mem_idx = msg.find('~').expect("memory segment missing");
+        assert!(
+            length_idx < points_idx && points_idx < mem_idx,
+            "message order must be length → points → memory, got: {msg}",
         );
     }
 }

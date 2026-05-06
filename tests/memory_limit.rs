@@ -22,7 +22,7 @@ fn zero_budget_keeps_only_the_empty_pattern() {
     assert_eq!(counts, vec![(0, 1)]);
     // A clamped run omits the Total line so the partial result stands on its own.
     assert_eq!(parse_total(&stdout), None);
-    // --quiet suppresses the "Lengths X–Y skipped" warning too.
+    // --quiet suppresses the "warning: insufficient memory …" line too.
     assert!(
         stderr.is_empty(),
         "stderr should be empty under --quiet, got: {stderr}"
@@ -37,8 +37,34 @@ fn tight_budget_emits_skip_warning_on_stderr() {
         .success();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
     assert!(
-        stderr.contains("Lengths 1") && stderr.contains("9 skipped"),
-        "stderr should mention the skipped range, got: {stderr}"
+        stderr.contains("warning:") && stderr.contains("insufficient memory"),
+        "stderr should carry a standard `warning:` line, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("--max-length 0"),
+        "warning should name the equivalent --max-length value inline, got: {stderr}"
+    );
+    assert!(
+        stderr.contains("available"),
+        "warning should report the budget shortfall, got: {stderr}"
+    );
+}
+
+#[test]
+fn skip_warning_appears_before_progress_region() {
+    // The whole point of moving the warning to the top of the run is so
+    // the user sees the cap before waiting on the DP. Pin that ordering
+    // by asserting the warning line comes before the elapsed-time line.
+    let assert = bin()
+        .args(["grid", "3x3", "--memory-limit", "0"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    let warn_idx = stderr.find("warning:").expect("expected warning line");
+    let footer_idx = stderr.find("Counted up to").expect("expected footer line");
+    assert!(
+        warn_idx < footer_idx,
+        "warning must precede the elapsed-time footer, got: {stderr}"
     );
 }
 

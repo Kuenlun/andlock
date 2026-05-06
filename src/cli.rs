@@ -198,8 +198,9 @@ struct MemoryArgs {
     ///
     /// Accepts plain bytes ("1024") or values with K/M/G/T suffixes (binary
     /// units; 1 KiB = 1024 B). When the run would allocate more, --max-length
-    /// is clamped to the largest length that fits and a warning lists the
-    /// skipped lengths.
+    /// is clamped to the largest length that fits and a `warning:` line
+    /// reports the equivalent --max-length value alongside the budget
+    /// shortfall.
     ///
     /// Defaults to ~80% of the OS-reported available RAM, sampled once at
     /// startup. The default guards against the DP silently growing into

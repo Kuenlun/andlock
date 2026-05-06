@@ -99,8 +99,8 @@ fn counts_go_to_stdout_warnings_to_stderr() {
     let stdout = String::from_utf8_lossy(&assert.get_output().stdout).into_owned();
     let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
 
-    assert!(!stdout.contains("skipped"));
-    assert!(stderr.contains("skipped"));
+    assert!(!stdout.contains("warning:"));
+    assert!(stderr.contains("warning:") && stderr.contains("insufficient memory"));
     // The clamped counts the user does see still land on stdout.
     assert!(parse_counts(&stdout).iter().any(|&(len, _)| len == 0));
 }
