@@ -225,7 +225,7 @@ fn build_dp_bar(
     let pb = mp.add(ProgressBar::new(dp_ticks));
     pb.set_style(bar_style());
     pb.set_prefix("Counting");
-    pb.set_message(dp_progress_message(0, effective, n, mem_est));
+    pb.set_message(dp_progress_message(effective.min(1), effective, n, mem_est));
     pb.enable_steady_tick(Duration::from_millis(80));
     Some(pb)
 }
@@ -374,29 +374,6 @@ mod tests {
     /// `try_reserve_exact` rejects the request up front; the `?`
     /// returns before the inner counter is invoked, so its own
     /// preconditions are never asserted.
-    /// The DP bar message is the user's primary signal for what the run
-    /// is doing while it is in flight, so its layout is part of the
-    /// public contract: the currently-computed length, the cap it will
-    /// reach, the total point count, and the peak DP allocation must
-    /// all appear, in that order, separated by commas. Pinning the
-    /// shape here keeps a stylistic refactor from silently regressing
-    /// the user-facing copy that integration tests do not assert on.
-    #[test]
-    fn dp_progress_message_carries_length_total_and_memory_in_order() {
-        let msg = dp_progress_message(9, 13, 27, 6_682_111_672);
-        assert!(
-            msg.starts_with("length 9 of 13"),
-            "current and effective lengths must lead the message, got: {msg}",
-        );
-        let length_idx = msg.find("length 9 of 13").unwrap();
-        let points_idx = msg.find("27 points").expect("points segment missing");
-        let mem_idx = msg.find('~').expect("memory segment missing");
-        assert!(
-            length_idx < points_idx && points_idx < mem_idx,
-            "message order must be length → points → memory, got: {msg}",
-        );
-    }
-
     #[test]
     fn drive_dp_propagates_allocator_failure_with_actionable_message() {
         let mp = MultiProgress::with_draw_target(ProgressDrawTarget::hidden());
@@ -417,6 +394,29 @@ mod tests {
         assert!(
             msg.contains("--max-length") && msg.contains("--memory-limit"),
             "expected remediation flags in: {msg}",
+        );
+    }
+
+    /// The DP bar message is the user's primary signal for what the run
+    /// is doing while it is in flight, so its layout is part of the
+    /// public contract: the currently-computed length, the cap it will
+    /// reach, the total point count, and the peak DP allocation must
+    /// all appear, in that order, separated by commas. Pinning the
+    /// shape here keeps a stylistic refactor from silently regressing
+    /// the user-facing copy that integration tests do not assert on.
+    #[test]
+    fn dp_progress_message_carries_length_total_and_memory_in_order() {
+        let msg = dp_progress_message(9, 13, 27, 6_682_111_672);
+        assert!(
+            msg.starts_with("length 9 of 13"),
+            "current and effective lengths must lead the message, got: {msg}",
+        );
+        let length_idx = msg.find("length 9 of 13").unwrap();
+        let points_idx = msg.find("27 points").expect("points segment missing");
+        let mem_idx = msg.find('~').expect("memory segment missing");
+        assert!(
+            length_idx < points_idx && points_idx < mem_idx,
+            "message order must be length → points → memory, got: {msg}",
         );
     }
 }
