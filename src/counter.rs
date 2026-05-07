@@ -16,7 +16,7 @@ You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
 
-use crate::grid::MAX_POINTS;
+use crate::mask::{self, Mask};
 
 /// Progress event emitted by [`count_patterns_dp`] during execution.
 ///
@@ -34,10 +34,14 @@ pub enum DpEvent {
 
 /// Exact binomial coefficient `C(n, k)`, returned as `u128`.
 ///
-/// The intermediate products in the standard `result = result * (n-i) / (i+1)`
-/// recurrence stay in `u128` so the routine remains exact for any `n` and `k`
-/// the rest of the crate can produce — well beyond the `n ≤ MAX_POINTS` the
-/// algorithm itself accepts.
+/// The intermediate `result * (n-i)` step can exceed `u128::MAX` for `n`
+/// past ~127 even when the final value would fit; in that case the
+/// routine saturates to `u128::MAX` rather than wrapping. Callers
+/// (`dp_table_bytes`, `dp_mask_ticks`, `dp_layer_capacity`) only feed
+/// the result through `saturating_mul` / `saturating_add` chains and
+/// `u64::try_from(...).unwrap_or(u64::MAX)`, so a saturated binomial
+/// flows through to a saturated byte count — exactly the "this run does
+/// not fit" signal the memory clamp wants.
 fn binomial(n: usize, k: usize) -> u128 {
     if k > n {
         return 0;
@@ -45,7 +49,10 @@ fn binomial(n: usize, k: usize) -> u128 {
     let k = if k * 2 > n { n - k } else { k };
     let mut result: u128 = 1;
     for i in 0..k {
-        result = result * (n - i) as u128 / (i + 1) as u128;
+        let Some(m) = result.checked_mul((n - i) as u128) else {
+            return u128::MAX;
+        };
+        result = m / (i + 1) as u128;
     }
     result
 }
@@ -84,15 +91,14 @@ pub fn dp_table_bytes(n: usize, max_length: usize) -> u64 {
         return u64::try_from(counts_bytes).unwrap_or(u64::MAX);
     }
 
-    let n_c = n.min(63);
-    let l = max_length.min(n_c);
-
     // Peak single popcount layer, in u128 entries. Layer p has C(n, p)·p
-    // entries; the loop bound `1..l` covers every layer the DP visits as
-    // either source or destination.
+    // entries; the loop bound `1..max_length` covers every layer the DP
+    // visits as either source or destination. `binomial` already saturates
+    // at u128::MAX when the intermediate product overflows, so passing any
+    // `n` up to `mask::MAX_POINTS` is well-defined here.
     let mut peak_layer_entries: u128 = 0;
-    for p in 1..l {
-        let entries = binomial(n_c, p).saturating_mul(p as u128);
+    for p in 1..max_length {
+        let entries = binomial(n, p).saturating_mul(p as u128);
         if entries > peak_layer_entries {
             peak_layer_entries = entries;
         }
@@ -154,16 +160,21 @@ impl DpScratch {
     /// short-circuits (`max_length < 2`) or takes the unconstrained fast
     /// path (every block mask is zero).
     ///
+    /// Generic over the [`Mask`] type so the same allocator works for
+    /// every supported width; the choice of width doesn't change the
+    /// scratch size, only the type of `blocks` accepted by the
+    /// unconstrained-check shortcut.
+    ///
     /// # Errors
     /// Returns the underlying [`std::collections::TryReserveError`] when
     /// the request cannot be satisfied. Surface the error to the user
     /// and let them lower `--max-length` or set `--memory-limit`.
-    pub fn allocate(
+    pub fn allocate<M: Mask>(
         n: usize,
-        blocks: &[u32],
+        blocks: &[M],
         max_length: usize,
     ) -> Result<Self, std::collections::TryReserveError> {
-        let half = if max_length < 2 || blocks.iter().all(|&b| b == 0) {
+        let half = if max_length < 2 || blocks.iter().all(|&b| b == M::ZERO) {
             0
         } else {
             dp_layer_capacity(n, max_length)
@@ -186,18 +197,26 @@ impl DpScratch {
 /// Computes the per-buffer entry count `M` for the ping-pong DP buffers at
 /// `max_length = l`, namely `max_{p ∈ 1..l} C(n, p)·p`. Returns 0 when
 /// `l < 2` (no DP buffer is needed in that case).
+///
+/// Arithmetic is performed in `u128` and saturated to `usize::MAX` at the
+/// boundary: at the wider mask widths `binomial(n, p)` can exceed
+/// `usize::MAX` while still fitting in `u128`, and a naive `as usize`
+/// would truncate the high bits — yielding a small bogus capacity, an
+/// undersized allocation, and out-of-bounds writes inside
+/// [`process_layer`]. Saturating instead lets [`DpScratch::allocate`]
+/// surface the request as a real allocator failure.
 fn dp_layer_capacity(n: usize, l: usize) -> usize {
     if l < 2 {
         return 0;
     }
-    let mut m: usize = n;
+    let mut m: u128 = n as u128;
     for p in 2..l {
-        let entries = (binomial(n, p) as usize).saturating_mul(p);
+        let entries = binomial(n, p).saturating_mul(p as u128);
         if entries > m {
             m = entries;
         }
     }
-    m
+    usize::try_from(m).unwrap_or(usize::MAX)
 }
 
 /// Returns the exact number of [`DpEvent::Mask`] events
@@ -219,36 +238,39 @@ pub fn dp_mask_ticks(n: usize, max_length: usize) -> u64 {
     if n == 0 || max_length < 2 {
         return 0;
     }
-    let n_c = n.min(63);
-    let l = max_length.min(n_c);
     let mut total: u128 = 0;
-    for p in 1..l {
-        total = total.saturating_add(binomial(n_c, p));
+    for p in 1..max_length {
+        total = total.saturating_add(binomial(n, p));
     }
     u64::try_from(total).unwrap_or(u64::MAX)
 }
 
-/// Next bitmask with the same popcount as `x` (Gosper's hack).
+/// Pascal's triangle, indexed `[i][j] = C(i, j)`. Sized to cover every
+/// `n ≤ mask::MAX_POINTS` (= 127) plus a margin for the highest index
+/// reached in [`process_layer`] (which reads `BINOM[bit_pos][j + 2]`
+/// with `bit_pos < n` and `j + 2 <= p + 1 <= max_length`).
 ///
-/// Used to enumerate masks in popcount-ascending order so that each popcount
-/// layer can emit a [`DpEvent::LengthDone`] as soon as it completes.
-const fn gosper_next(x: u32) -> u32 {
-    let c = x & x.wrapping_neg();
-    let r = x.wrapping_add(c);
-    (((r ^ x) >> 2) / c) | r
-}
+/// Entries are stored as `usize` so the colex-rank prefix/suffix sums
+/// inside the DP need no further conversion before indexing the
+/// destination layer's `Vec`. Saturating addition guards the construction
+/// against entries past the `usize` ceiling — those rows correspond to
+/// popcounts whose DP layer would dwarf any physical memory and so are
+/// unreachable in practice: any `(n, max_length)` whose
+/// [`dp_layer_capacity`] exceeds `usize::MAX` is rejected by
+/// [`DpScratch::allocate`] before [`process_layer`] runs, so a saturated
+/// cell can never be read. The
+/// `binom_reads_never_saturate_for_clampable_runs` test pins this
+/// invariant by sweeping every `(n, max_length)` the dispatcher accepts.
+const SLOTS: usize = mask::MAX_POINTS + 3;
 
-/// Pascal's triangle, indexed `[n][k] = C(n, k)`. Sized to cover every
-/// `n ≤ MAX_POINTS` (= 31) plus a margin for the highest index reached in
-/// [`process_layer`]. `C(32, 16) ≈ 6.0 × 10⁸` fits in `u32`.
-const BINOM: [[u32; 33]; 33] = {
-    let mut t = [[0u32; 33]; 33];
+static BINOM: [[usize; SLOTS]; SLOTS] = {
+    let mut t = [[0usize; SLOTS]; SLOTS];
     let mut i = 0;
-    while i < 33 {
+    while i < SLOTS {
         t[i][0] = 1;
         let mut j = 1;
         while j <= i {
-            t[i][j] = t[i - 1][j - 1] + t[i - 1][j];
+            t[i][j] = t[i - 1][j - 1].saturating_add(t[i - 1][j]);
             j += 1;
         }
         i += 1;
@@ -289,6 +311,14 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 /// (e.g. an unrestricted 21-node graph can produce 21! ≈ 5.1 × 10¹⁹ patterns,
 /// while `u64::MAX` ≈ 1.8 × 10¹⁹).
 ///
+/// # Mask width
+/// Generic over [`Mask`] — the DP body, the unconstrained fast path,
+/// and `process_layer` all monomorphise per impl, so `M = u32` retains
+/// the original (byte-identical) hot path while `M = u64` and `M = u128`
+/// extend the same logic to wider grids. The CLI's pipeline picks the
+/// smallest sufficient width once per run; library callers who already
+/// know `n` instantiate the function directly.
+///
 /// # Memory
 /// Two adjacent popcount layers are alive at any time: the source layer
 /// (popcount `p`, read) and the destination (popcount `p+1`, written). Both
@@ -315,24 +345,28 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 /// version; layering only changes storage.
 ///
 /// # Panics
-/// Panics if `n > MAX_POINTS`, `blocks.len() != n * n`, `max_length > n`,
+/// Panics if `n > M::MAX_POINTS`, `blocks.len() != n * n`, `max_length > n`,
 /// or `scratch` was sized for a different `(n, max_length)` shape than
 /// the one requested.
-pub fn count_patterns_dp<F: FnMut(DpEvent)>(
+pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent)>(
     scratch: &mut DpScratch,
     n: usize,
-    blocks: &[u32],
+    blocks: &[M],
     max_length: usize,
     mut on_event: F,
 ) -> Vec<u128> {
-    assert!(n <= MAX_POINTS, "N={n} exceeds the maximum of {MAX_POINTS}");
+    assert!(
+        n <= M::MAX_POINTS,
+        "N={n} exceeds the maximum of {}",
+        M::MAX_POINTS
+    );
     assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
     assert!(
         max_length <= n,
         "max_length={max_length} must not exceed n={n}"
     );
 
-    if blocks.iter().all(|&b| b == 0) {
+    if blocks.iter().all(|&b| b == M::ZERO) {
         let counts = count_unconstrained(n, max_length);
         for (k, &c) in counts.iter().enumerate() {
             on_event(DpEvent::LengthDone {
@@ -369,7 +403,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
     );
     let (mut dp_curr, mut dp_next) = scratch.split_mut();
 
-    let full_mask: u32 = (1u32 << n) - 1;
+    let full_mask: M = M::low_bits(n);
 
     // The two buffers were sized to the largest popcount layer this run
     // will ever hold (see [`dp_layer_capacity`]). They are pre-allocated
@@ -405,7 +439,12 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
         // would never be read.
         let need_dp_next = next_p < max_length;
         let next_len = if need_dp_next {
-            binomial(n, next_p) as usize * next_p
+            // Match `dp_layer_capacity`: keep the product in u128 and
+            // saturate at the `usize` boundary so the wider mask widths
+            // do not silently truncate a > usize::MAX binomial down to
+            // a small bogus length.
+            let raw = binomial(n, next_p).saturating_mul(next_p as u128);
+            usize::try_from(raw).unwrap_or(usize::MAX)
         } else {
             0
         };
@@ -419,7 +458,7 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
             }
         }
 
-        process_layer(LayerCtx {
+        process_layer::<M, _>(LayerCtx {
             n,
             full_mask,
             blocks,
@@ -451,10 +490,10 @@ pub fn count_patterns_dp<F: FnMut(DpEvent)>(
 ///
 /// Pulled into its own struct so the helper avoids `clippy::too_many_arguments`
 /// while still threading the streaming `on_event` callback through.
-struct LayerCtx<'a, F: FnMut(DpEvent)> {
+struct LayerCtx<'a, M: Mask, F: FnMut(DpEvent)> {
     n: usize,
-    full_mask: u32,
-    blocks: &'a [u32],
+    full_mask: M,
+    blocks: &'a [M],
     p: usize,
     need_dp_next: bool,
     dp_curr: &'a [u128],
@@ -469,7 +508,7 @@ struct LayerCtx<'a, F: FnMut(DpEvent)> {
 /// Fires one [`DpEvent::Mask`] per mask. The caller is responsible for
 /// only invoking `process_layer` for popcounts that contribute work
 /// (`p < max_length`); the helper does no further bounds check.
-fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
+fn process_layer<M: Mask, F: FnMut(DpEvent)>(ctx: LayerCtx<'_, M, F>) {
     let LayerCtx {
         n,
         full_mask,
@@ -484,21 +523,21 @@ fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
 
     let next_p = p + 1;
     // prefix/suffix sums reconstruct colex_rank(mask | next_bit) in O(1) per extension
-    let mut prefix_sum: [u32; 33] = [0; 33];
-    let mut suffix_sum: [u32; 33] = [0; 33];
-    let mut bit_pos: [u32; 32] = [0; 32];
+    let mut prefix_sum: [usize; SLOTS] = [0; SLOTS];
+    let mut suffix_sum: [usize; SLOTS] = [0; SLOTS];
+    let mut bit_pos: [u32; SLOTS] = [0; SLOTS];
 
-    let mut idx_curr: u32 = 0;
-    let mut mask: u32 = (1u32 << p) - 1;
-    let last: u32 = mask << (n - p);
+    let mut idx_curr: usize = 0;
+    let mut mask: M = M::low_bits(p);
+    let last: M = M::low_bits(p) << (n - p);
     loop {
         on_event(DpEvent::Mask);
-        let base_curr = (idx_curr as usize) * p;
+        let base_curr = idx_curr * p;
 
         if need_dp_next {
             let mut tmp = mask;
             let mut i = 0usize;
-            while tmp != 0 {
+            while tmp != M::ZERO {
                 let bit = tmp & tmp.wrapping_neg();
                 let pos = bit.trailing_zeros();
                 bit_pos[i] = pos;
@@ -514,7 +553,7 @@ fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
 
         let mut end_off: usize = 0;
         let mut visited = mask;
-        while visited != 0 {
+        while visited != M::ZERO {
             let end_bit = visited & visited.wrapping_neg();
             visited ^= end_bit;
             let end = end_bit.trailing_zeros() as usize;
@@ -526,7 +565,7 @@ fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
 
             let row_start = end * n;
             let mut free = !mask & full_mask;
-            while free != 0 {
+            while free != M::ZERO {
                 let next_bit = free & free.wrapping_neg();
                 free ^= next_bit;
                 let next = next_bit.trailing_zeros() as usize;
@@ -538,10 +577,10 @@ fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
                         // `next_bit` is not in `mask`, so the set bits of
                         // (mask | next_bit) below `next_bit` are exactly
                         // the bits of `mask` below it.
-                        let next_off = (mask & (next_bit - 1)).count_ones() as usize;
+                        let next_off = (mask & next_bit.wrapping_sub_one()).count_ones() as usize;
                         let idx_new =
                             prefix_sum[next_off] + BINOM[next][next_off + 1] + suffix_sum[next_off];
-                        dp_next[idx_new as usize * next_p + next_off] += ways;
+                        dp_next[idx_new * next_p + next_off] += ways;
                     }
                 }
             }
@@ -550,16 +589,35 @@ fn process_layer<F: FnMut(DpEvent)>(ctx: LayerCtx<'_, F>) {
         if mask == last {
             break;
         }
-        mask = gosper_next(mask);
+        mask = mask.gosper_next();
     }
 }
 
 #[cfg(test)]
 #[cfg_attr(coverage_nightly, coverage(off))]
 mod tests {
-    use super::count_unconstrained;
     use super::*;
     use crate::grid::{GridDefinition, build_grid_definition, compute_blocks};
+
+    /// Pascal's-triangle table sized for the legacy `u32` path. Used by
+    /// the test-only `colex_rank` oracle below, which mirrors the
+    /// production rank arithmetic at `u32` width so a future regression
+    /// in `BINOM`'s widened layout is caught against a hand-rolled
+    /// reference.
+    const BINOM_U32: [[u32; 33]; 33] = {
+        let mut t = [[0u32; 33]; 33];
+        let mut i = 0;
+        while i < 33 {
+            t[i][0] = 1;
+            let mut j = 1;
+            while j <= i {
+                t[i][j] = t[i - 1][j - 1] + t[i - 1][j];
+                j += 1;
+            }
+            i += 1;
+        }
+        t
+    };
 
     /// Colex rank of a bitmask of popcount `k`: a perfect hash into
     /// `[0, C(n, k))` where bit positions `a_1 < … < a_k` map to
@@ -570,18 +628,28 @@ mod tests {
         while mask != 0 {
             let bit = mask & mask.wrapping_neg();
             let pos = bit.trailing_zeros() as usize;
-            rank += BINOM[pos][k];
+            rank += BINOM_U32[pos][k];
             mask ^= bit;
             k += 1;
         }
         rank
     }
 
+    /// Standalone Gosper's-hack helper for the perfect-hash test below.
+    /// The production code calls it through the [`Mask`] trait; pinning a
+    /// `u32`-only copy here keeps the test free of a trait round-trip.
+    const fn gosper_next_u32(x: u32) -> u32 {
+        let c = x & x.wrapping_neg();
+        let r = x.wrapping_add(c);
+        (((r ^ x) >> 2) / c) | r
+    }
+
     // IDDFS oracle: cross-checks count_patterns_dp. Doesn't scale past n ≈ 25.
-    fn count_patterns_dfs(n: usize, blocks: &[u32], max_length: usize) -> Vec<u128> {
+    fn count_patterns_dfs<M: Mask>(n: usize, blocks: &[M], max_length: usize) -> Vec<u128> {
         assert!(
-            n <= MAX_POINTS,
-            "N={n} exceeds the supported maximum of {MAX_POINTS}"
+            n <= M::MAX_POINTS,
+            "N={n} exceeds the supported maximum of {}",
+            M::MAX_POINTS
         );
         assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
         assert!(
@@ -589,7 +657,7 @@ mod tests {
             "max_length={max_length} must not exceed n={n}"
         );
 
-        if blocks.iter().all(|&b| b == 0) {
+        if blocks.iter().all(|&b| b == M::ZERO) {
             return count_unconstrained(n, max_length);
         }
 
@@ -603,25 +671,25 @@ mod tests {
             return counts;
         }
 
-        let full_mask: u32 = (1u32 << n) - 1;
+        let full_mask: M = M::low_bits(n);
 
         for (i, count_slot) in counts[2..].iter_mut().enumerate() {
             let target = i + 2;
             let mut count_target = 0u128;
             for start in 0..n {
-                let start_bit = 1u32 << start;
+                let start_bit = M::bit(start);
                 let row = start * n;
                 for second in 0..n {
                     if second == start {
                         continue;
                     }
-                    let second_bit = 1u32 << second;
+                    let second_bit = M::bit(second);
                     let blockers = blocks[row + second];
                     if start_bit & blockers == blockers {
                         if target == 2 {
                             count_target += 1;
                         } else {
-                            count_target += iddfs_count(
+                            count_target += iddfs_count::<M>(
                                 start_bit | second_bit,
                                 second,
                                 2,
@@ -640,19 +708,19 @@ mod tests {
         counts
     }
 
-    fn iddfs_count(
-        mask: u32,
+    fn iddfs_count<M: Mask>(
+        mask: M,
         end: usize,
         depth: usize,
         target: usize,
-        blocks: &[u32],
+        blocks: &[M],
         n: usize,
-        full_mask: u32,
+        full_mask: M,
     ) -> u128 {
         let mut total = 0u128;
         let row = end * n;
         let mut free = !mask & full_mask;
-        while free != 0 {
+        while free != M::ZERO {
             let next_bit = free & free.wrapping_neg();
             free ^= next_bit;
             let next = next_bit.trailing_zeros() as usize;
@@ -661,7 +729,7 @@ mod tests {
                 if depth + 1 == target {
                     total += 1;
                 } else {
-                    total += iddfs_count(
+                    total += iddfs_count::<M>(
                         mask | next_bit,
                         next,
                         depth + 1,
@@ -680,13 +748,14 @@ mod tests {
         GridDefinition { dimensions, points }
     }
 
-    // Runs both counters, asserts they agree, and returns the result.
-    // Every test that checks output values goes through this helper so that
-    // both algorithms are verified in a single pass.
+    // Runs both counters at u32 width, asserts they agree, and returns the
+    // result. Every test that checks output values goes through this helper
+    // so that both algorithms are verified in a single pass on the legacy
+    // hot path.
     fn count(n: usize, blocks: &[u32], max_length: usize) -> Vec<u128> {
-        let mut scratch = DpScratch::allocate(n, blocks, max_length).unwrap();
+        let mut scratch = DpScratch::allocate::<u32>(n, blocks, max_length).unwrap();
         let dp = count_patterns_dp(&mut scratch, n, blocks, max_length, |_| {});
-        let dfs = count_patterns_dfs(n, blocks, max_length);
+        let dfs = count_patterns_dfs::<u32>(n, blocks, max_length);
         assert_eq!(
             dp, dfs,
             "DP and DFS counts diverge for n={n}, max_length={max_length}"
@@ -706,7 +775,7 @@ mod tests {
             ],
         );
         g.validate().unwrap();
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         let n = g.points.len();
         let counts = count(n, &blocks, n);
 
@@ -726,7 +795,7 @@ mod tests {
     #[test]
     fn no_three_collinear_collapses_to_permutations() {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert!(blocks.iter().all(|&b| b == 0));
         let n = g.points.len();
         assert_eq!(count(n, &blocks, n), vec![1, 4, 12, 24, 24]);
@@ -735,7 +804,7 @@ mod tests {
     #[test]
     fn blocker_becomes_transparent_once_visited() {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         let n = g.points.len();
         let counts = count(n, &blocks, n);
 
@@ -749,13 +818,13 @@ mod tests {
     fn edge_cases_zero_and_one_point() {
         let empty = grid(2, vec![]);
         empty.validate().unwrap();
-        let blocks = compute_blocks(&empty);
+        let blocks = compute_blocks::<u32>(&empty);
         assert!(blocks.is_empty());
         assert_eq!(count(0, &blocks, 0), vec![1]);
 
         let single = grid(2, vec![vec![7, 7]]);
         single.validate().unwrap();
-        let blocks = compute_blocks(&single);
+        let blocks = compute_blocks::<u32>(&single);
         assert_eq!(blocks, vec![0]);
         assert_eq!(count(1, &blocks, 1), vec![1, 1]);
     }
@@ -763,7 +832,7 @@ mod tests {
     #[test]
     fn generated_3x3_matches_known_pattern_counts() {
         let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         let n = g.points.len();
         let counts = count(n, &blocks, n);
         assert_eq!(counts[4..=9].iter().sum::<u128>(), 389_112);
@@ -772,7 +841,7 @@ mod tests {
     #[test]
     fn max_length_truncates_counts_to_prefix_of_full_run() {
         let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         let n = g.points.len();
         let full = count(n, &blocks, n);
         for cap in 0..=n {
@@ -800,10 +869,10 @@ mod tests {
     #[ignore = "allocates ~125 MB — run manually with: cargo test -- --ignored"]
     fn count_4x4_plus_5_free_is_monotonic_in_length() {
         let g = build_grid_definition(&[4, 4], 5);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         let n = g.points.len();
         assert_eq!(n, 21);
-        let mut scratch = DpScratch::allocate(n, &blocks, n).unwrap();
+        let mut scratch = DpScratch::allocate::<u32>(n, &blocks, n).unwrap();
         let counts = count_patterns_dp(&mut scratch, n, &blocks, n, |_| {});
         for k in 1..=n {
             assert!(
@@ -829,10 +898,10 @@ mod tests {
     #[ignore = "allocates ~1 GB — run manually with: cargo test -- --ignored"]
     fn count_4x4_plus_8_free_is_monotonic_in_length() {
         let g = build_grid_definition(&[4, 4], 8);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         let n = g.points.len();
         assert_eq!(n, 24);
-        let mut scratch = DpScratch::allocate(n, &blocks, n).unwrap();
+        let mut scratch = DpScratch::allocate::<u32>(n, &blocks, n).unwrap();
         let counts = count_patterns_dp(&mut scratch, n, &blocks, n, |_| {});
         for k in 1..=n {
             assert!(
@@ -852,21 +921,21 @@ mod tests {
     #[test]
     fn max_length_zero_on_nonempty_grid_returns_only_empty_pattern() {
         let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert_eq!(count(g.points.len(), &blocks, 0), vec![1]);
     }
 
     #[test]
     fn max_length_one_reports_only_singletons() {
         let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert_eq!(count(g.points.len(), &blocks, 1), vec![1, 9]);
     }
 
     #[test]
     fn max_length_four_matches_android_minimum_run() {
         let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert_eq!(count(g.points.len(), &blocks, 4)[4], 1_624);
     }
 
@@ -895,7 +964,7 @@ mod tests {
     #[test]
     fn fast_path_matches_known_dp_result_for_unconstrained_grid() {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert!(
             blocks.iter().all(|&b| b == 0),
             "expected zero block matrix for a square grid"
@@ -911,7 +980,7 @@ mod tests {
     fn constrained_grid_does_not_use_fast_path() {
         // Three collinear points: node 1 blocks 0→2 and 2→0.
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert!(
             blocks.iter().any(|&b| b != 0),
             "expected non-zero block matrix for collinear points"
@@ -968,6 +1037,22 @@ mod tests {
         let bytes = dp_table_bytes(31, 31);
         assert!(bytes < u64::MAX);
         assert!(bytes > (1u64 << 30), "expected at least 1 GiB, got {bytes}");
+    }
+
+    /// `dp_table_bytes` must saturate cleanly at the wider [`Mask`]
+    /// ceilings rather than wrap. At `n = mask::MAX_POINTS` the peak
+    /// popcount layer's byte count vastly exceeds any physical
+    /// `u64::MAX`-byte bound, so the saturating-arithmetic chain is
+    /// expected to flatten to `u64::MAX`. Pinning that here proves the
+    /// `binomial → saturating_mul → saturating_add → try_from` pipeline
+    /// is wired correctly even when intermediate `u128` products
+    /// overflow during construction.
+    #[test]
+    fn dp_table_bytes_saturates_at_widest_mask_ceiling() {
+        assert_eq!(
+            dp_table_bytes(crate::mask::MAX_POINTS, crate::mask::MAX_POINTS),
+            u64::MAX
+        );
     }
 
     // Hand-verified expected sizes for n = 3 across every max_length.
@@ -1064,7 +1149,7 @@ mod tests {
                 if mask == last {
                     break;
                 }
-                mask = gosper_next(mask);
+                mask = gosper_next_u32(mask);
                 expected += 1;
             }
         }
@@ -1077,7 +1162,7 @@ mod tests {
     #[test]
     fn dp_mask_event_count_matches_dp_mask_ticks() {
         let g = build_grid_definition(&[3, 3], 0);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert!(
             blocks.iter().any(|&b| b != 0),
             "3×3 grid must be constrained for this test to exercise the popcount loop"
@@ -1085,7 +1170,7 @@ mod tests {
         let n = g.points.len();
         for cap in 0..=n {
             let mask_count = std::cell::Cell::new(0u64);
-            let mut scratch = DpScratch::allocate(n, &blocks, cap).unwrap();
+            let mut scratch = DpScratch::allocate::<u32>(n, &blocks, cap).unwrap();
             count_patterns_dp(&mut scratch, n, &blocks, cap, |event| {
                 if matches!(event, DpEvent::Mask) {
                     mask_count.set(mask_count.get() + 1);
@@ -1123,11 +1208,80 @@ mod tests {
         assert_eq!(binomial(0, 1), 0);
     }
 
+    /// `binomial` must saturate to `u128::MAX` on intermediate-product
+    /// overflow rather than wrap silently. At `n = 200, k = 100` the
+    /// product `C(n, k_partial) * (n - k_partial)` blows past `u128::MAX`
+    /// well before the final value would fit, so the saturating
+    /// short-circuit is the only path that can return without
+    /// triggering Rust's release-mode `u128 *` UB. Pinning the saturated
+    /// return here keeps `dp_table_bytes` correct for the widest
+    /// supported `n`.
+    #[test]
+    fn binomial_saturates_when_intermediate_product_overflows() {
+        assert_eq!(binomial(200, 100), u128::MAX);
+    }
+
     // Covers `l < 2`, where no DP buffer is needed and the capacity is 0.
     #[test]
     fn dp_layer_capacity_returns_zero_below_two() {
         assert_eq!(dp_layer_capacity(5, 0), 0);
         assert_eq!(dp_layer_capacity(5, 1), 0);
+    }
+
+    /// `dp_layer_capacity` must saturate to `usize::MAX` rather than
+    /// silently truncate when a `binomial(n, p) * p` product exceeds
+    /// `usize`. At `n = 127, max_length = 127` the peak `C(127, 63) * 63`
+    /// is on the order of `2^127`, far above `usize::MAX` on any 64-bit
+    /// host; saturating here is the only thing that lets
+    /// [`DpScratch::allocate`] forward the request as a real
+    /// `try_reserve_exact` failure instead of producing an undersized
+    /// buffer that [`process_layer`] would write past.
+    #[test]
+    fn dp_layer_capacity_saturates_when_binomial_exceeds_usize() {
+        assert_eq!(
+            dp_layer_capacity(crate::mask::MAX_POINTS, crate::mask::MAX_POINTS),
+            usize::MAX
+        );
+    }
+
+    /// BINOM-read safety: every cell `process_layer` can index for any
+    /// `(n, max_length)` whose `dp_layer_capacity` did not saturate must
+    /// be non-saturated. Saturated cells exist deep in the table (rows
+    /// past ~67 on a 64-bit host), but [`DpScratch::allocate`] rejects
+    /// any `(n, max_length)` whose capacity saturates — so the algorithm
+    /// only enters [`process_layer`] for shapes whose reachable BINOM
+    /// rectangle is finite. Pinning that invariant by sweep guards
+    /// against a future change to either the memory clamp or the
+    /// `process_layer` indexing arithmetic that would silently let the
+    /// DP read a `usize::MAX` cell.
+    #[test]
+    fn binom_reads_never_saturate_for_clampable_runs() {
+        for n in 1..=mask::MAX_POINTS {
+            // Largest `max_length` whose buffer the allocator could
+            // theoretically satisfy. Past this boundary
+            // `DpScratch::allocate` short-circuits to `Err` and
+            // `process_layer` is never reached.
+            let l_max = (2..=n)
+                .rev()
+                .find(|&l| dp_layer_capacity(n, l) != usize::MAX);
+            let Some(l) = l_max else {
+                continue;
+            };
+            // `process_layer` reads `BINOM[i][j]` with `i < n` and
+            // `j` running through `i + 1`, `j + 2`, and `next_off + 1`
+            // — all bounded by `next_p ≤ max_length`. Sweep the full
+            // reachable rectangle.
+            for (i, row) in BINOM.iter().enumerate().take(n) {
+                for (j, &cell) in row.iter().enumerate().take(l + 1) {
+                    assert_ne!(
+                        cell,
+                        usize::MAX,
+                        "BINOM[{i}][{j}] saturated for n={n}, max_length={l} \
+                         — process_layer would read a bogus value",
+                    );
+                }
+            }
+        }
     }
 
     // `zeroed_buffer` is a thin wrapper around `Vec::try_reserve_exact` plus a
@@ -1150,15 +1304,15 @@ mod tests {
     // because the unconstrained fast path will handle it.
     #[test]
     fn dp_scratch_allocate_is_empty_when_dp_body_short_circuits() {
-        let constrained = compute_blocks(&build_grid_definition(&[3, 3], 0));
+        let constrained: Vec<u32> = compute_blocks(&build_grid_definition(&[3, 3], 0));
         for max_length in 0..=1 {
-            let scratch = DpScratch::allocate(9, &constrained, max_length).unwrap();
+            let scratch = DpScratch::allocate::<u32>(9, &constrained, max_length).unwrap();
             assert_eq!(scratch.buf.len(), 0);
             assert_eq!(scratch.half, 0);
         }
 
         let unconstrained = vec![0u32; 9];
-        let scratch = DpScratch::allocate(3, &unconstrained, 3).unwrap();
+        let scratch = DpScratch::allocate::<u32>(3, &unconstrained, 3).unwrap();
         assert_eq!(scratch.buf.len(), 0);
         assert_eq!(scratch.half, 0);
     }
@@ -1167,8 +1321,8 @@ mod tests {
     // `dp_layer_capacity(n, max_length)` `u128` slots, all zeroed.
     #[test]
     fn dp_scratch_allocate_sizes_to_two_ping_pong_layers() {
-        let blocks = compute_blocks(&build_grid_definition(&[3, 3], 0));
-        let scratch = DpScratch::allocate(9, &blocks, 9).unwrap();
+        let blocks = compute_blocks::<u32>(&build_grid_definition(&[3, 3], 0));
+        let scratch = DpScratch::allocate::<u32>(9, &blocks, 9).unwrap();
         let half = dp_layer_capacity(9, 9);
         assert_eq!(scratch.half, half);
         assert_eq!(scratch.buf.len(), 2 * half);
@@ -1197,15 +1351,96 @@ mod tests {
     #[test]
     fn dp_mask_events_are_zero_on_unconstrained_fast_path() {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert!(blocks.iter().all(|&b| b == 0));
         let n = g.points.len();
-        let mut scratch = DpScratch::allocate(n, &blocks, n).unwrap();
+        let mut scratch = DpScratch::allocate::<u32>(n, &blocks, n).unwrap();
         count_patterns_dp(&mut scratch, n, &blocks, n, |event| {
             assert!(
                 !matches!(event, DpEvent::Mask),
                 "unconstrained fast path must not emit Mask events",
             );
         });
+    }
+
+    /// Cross-width parity: every supported [`Mask`] impl, run on the same
+    /// constrained 3×3 grid, must produce the bit-identical `counts`
+    /// vector. This pins the contract that monomorphisation only changes
+    /// how the visited-set is encoded — never the result — and catches a
+    /// future impl that accidentally diverges in `bit`, `low_bits`,
+    /// `gosper_next`, or any of the other forwarded methods.
+    #[test]
+    fn dp_widths_agree_on_constrained_grid() {
+        let g = build_grid_definition(&[3, 3], 0);
+        let n = g.points.len();
+
+        let blocks_u32: Vec<u32> = compute_blocks(&g);
+        let blocks_u64: Vec<u64> = compute_blocks(&g);
+        let blocks_u128: Vec<u128> = compute_blocks(&g);
+
+        let mut s32 = DpScratch::allocate::<u32>(n, &blocks_u32, n).unwrap();
+        let mut s64 = DpScratch::allocate::<u64>(n, &blocks_u64, n).unwrap();
+        let mut s128 = DpScratch::allocate::<u128>(n, &blocks_u128, n).unwrap();
+
+        let c32 = count_patterns_dp(&mut s32, n, &blocks_u32, n, |_| {});
+        let c64 = count_patterns_dp(&mut s64, n, &blocks_u64, n, |_| {});
+        let c128 = count_patterns_dp(&mut s128, n, &blocks_u128, n, |_| {});
+
+        assert_eq!(c32, c64);
+        assert_eq!(c64, c128);
+    }
+
+    /// Cross-width parity on the unconstrained fast path. With every
+    /// block mask zero the DP body short-circuits to
+    /// `count_unconstrained` — but the all-zero check is itself
+    /// per-width (`b == M::ZERO`), so this guards the fast-path branch
+    /// at every supported width.
+    #[test]
+    fn dp_widths_agree_on_unconstrained_fast_path() {
+        let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![1, 1], vec![0, 1]]);
+        let n = g.points.len();
+        let blocks_u32: Vec<u32> = compute_blocks(&g);
+        let blocks_u64: Vec<u64> = compute_blocks(&g);
+        let blocks_u128: Vec<u128> = compute_blocks(&g);
+
+        let mut s32 = DpScratch::allocate::<u32>(n, &blocks_u32, n).unwrap();
+        let mut s64 = DpScratch::allocate::<u64>(n, &blocks_u64, n).unwrap();
+        let mut s128 = DpScratch::allocate::<u128>(n, &blocks_u128, n).unwrap();
+
+        let c32 = count_patterns_dp(&mut s32, n, &blocks_u32, n, |_| {});
+        let c64 = count_patterns_dp(&mut s64, n, &blocks_u64, n, |_| {});
+        let c128 = count_patterns_dp(&mut s128, n, &blocks_u128, n, |_| {});
+
+        let expected = vec![1u128, 4, 12, 24, 24];
+        assert_eq!(c32, expected);
+        assert_eq!(c64, expected);
+        assert_eq!(c128, expected);
+    }
+
+    /// Cross-width parity past the `u32` ceiling. `n = 32` cannot be
+    /// represented in `u32` (`MAX_POINTS = 31`), so the smaller parity
+    /// tests above cannot pin the `u64`-vs-`u128` contract on its own
+    /// — this one does, by running both wider monomorphisations on a
+    /// constrained 1×32 grid and asserting bit-identical `counts`.
+    /// `max_length` is capped to 4 so the run stays small while still
+    /// exercising several popcount layers (the full DP body, not just
+    /// the early-exit branches).
+    #[test]
+    fn dp_widths_u64_u128_agree_past_u32_ceiling() {
+        let g = build_grid_definition(&[1, 32], 0);
+        let n = g.points.len();
+        assert_eq!(n, 32);
+
+        let blocks_u64: Vec<u64> = compute_blocks(&g);
+        let blocks_u128: Vec<u128> = compute_blocks(&g);
+        let max_length = 4;
+
+        let mut s64 = DpScratch::allocate::<u64>(n, &blocks_u64, max_length).unwrap();
+        let mut s128 = DpScratch::allocate::<u128>(n, &blocks_u128, max_length).unwrap();
+
+        let c64 = count_patterns_dp(&mut s64, n, &blocks_u64, max_length, |_| {});
+        let c128 = count_patterns_dp(&mut s128, n, &blocks_u128, max_length, |_| {});
+
+        assert_eq!(c64, c128);
     }
 }

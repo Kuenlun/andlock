@@ -139,3 +139,58 @@ fn generous_budget_matches_unconstrained_run() {
         parse_total(&without_limit_out)
     );
 }
+
+/// Tight budget on the u64 dispatch arm: a 32-point line with
+/// `--memory-limit 0` clamps `--max-length` to 0 and emits the same
+/// `warning:` line as the u32 path. This exercises the clamp branch
+/// of `run_dp_sequence::<u64>` so the wider monomorphisation gets
+/// the same coverage as `Width::U32`.
+#[test]
+fn tight_budget_emits_skip_warning_at_u64_path() {
+    let assert = bin()
+        .args(["grid", "1x32", "--memory-limit", "0"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("warning:") && stderr.contains("insufficient memory"),
+        "stderr should carry the standard warning at u64 width: {stderr}",
+    );
+}
+
+/// Symmetric clamp test for the u128 dispatch arm.
+#[test]
+fn tight_budget_emits_skip_warning_at_u128_path() {
+    let assert = bin()
+        .args(["grid", "1x64", "--memory-limit", "0"])
+        .assert()
+        .success();
+    let stderr = String::from_utf8_lossy(&assert.get_output().stderr).into_owned();
+    assert!(
+        stderr.contains("warning:") && stderr.contains("insufficient memory"),
+        "stderr should carry the standard warning at u128 width: {stderr}",
+    );
+}
+
+/// Non-quiet run on the u64 dispatch arm at an effective length that
+/// still triggers the DP progress bar (`effective >= 2`). Exercises
+/// the `Some(pb)` arm of every progress-bar guard inside
+/// `run_dp_sequence::<u64>` — the build spinner, the count bar, and
+/// their symmetric `finish_and_clear` cleanup paths — so the wider
+/// monomorphisation matches `Width::U32`'s branch coverage.
+#[test]
+fn non_quiet_run_at_u64_path_drives_progress_region() {
+    bin()
+        .args(["grid", "1x32", "--max-length", "3"])
+        .assert()
+        .success();
+}
+
+/// Symmetric non-quiet run on the u128 dispatch arm.
+#[test]
+fn non_quiet_run_at_u128_path_drives_progress_region() {
+    bin()
+        .args(["grid", "1x64", "--max-length", "3"])
+        .assert()
+        .success();
+}

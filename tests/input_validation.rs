@@ -38,10 +38,10 @@ fn empty_dim_component_is_rejected() {
 #[test]
 fn too_many_points_reports_max_supported() {
     common::bin()
-        .args(["grid", "6x6"])
+        .args(["grid", "12x12"])
         .assert()
         .failure()
-        .stderr(contains("36 points exceeds the supported maximum of 31"));
+        .stderr(contains("144 points exceeds the supported maximum of 127"));
 }
 
 #[test]
@@ -130,7 +130,7 @@ fn json_with_dim_mismatch_reports_offending_point() {
 fn json_with_too_many_points_reports_max_supported() {
     use std::fmt::Write as _;
     let mut json = String::from(r#"{"dimensions":1,"points":["#);
-    for i in 0..32 {
+    for i in 0..128 {
         if i > 0 {
             json.push(',');
         }
@@ -142,7 +142,7 @@ fn json_with_too_many_points_reports_max_supported() {
         .write_stdin(json)
         .assert()
         .failure()
-        .stderr(contains("32 points exceeds the supported maximum of 31"));
+        .stderr(contains("128 points exceeds the supported maximum of 127"));
 }
 
 #[test]

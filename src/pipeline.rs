@@ -20,6 +20,12 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 //! DP scratch buffers, drives the counter, and prints the table+summary
 //! block once the run finishes. Bridges the lib crate's algorithmic
 //! pieces with the CLI's progress region and table renderer.
+//!
+//! The mask width is picked once per run from `grid.points.len()` via
+//! [`andlock::mask::smallest_for`]; the existing hot path on `u32`
+//! (`n ≤ 31`) stays byte-identical to before, while wider grids extend
+//! the same code through `u64` (`n ≤ 63`) or `u128` (`n ≤ 127`)
+//! monomorphisations.
 
 use std::time::{Duration, Instant};
 
@@ -29,6 +35,7 @@ use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 
 use andlock::counter::{DpEvent, DpScratch, count_patterns_dp, dp_mask_ticks, dp_table_bytes};
 use andlock::grid::{GridDefinition, compute_blocks};
+use andlock::mask::{self, Mask, Width};
 
 use crate::memory::resolve_memory_budget;
 use crate::output::{LengthPrinter, RenderedReport, format_count, render_final, style_or_default};
@@ -67,7 +74,9 @@ fn bar_style() -> ProgressStyle {
     .progress_chars("=> ")
 }
 
-/// Runs the end-to-end counting pipeline for a single grid: builds the
+/// Runs the end-to-end counting pipeline for a single grid.
+///
+/// Picks the smallest sufficient [`Mask`] width for the grid, builds the
 /// block matrix, resolves the active memory budget, allocates the DP
 /// scratch, drives the counter, and prints the unified
 /// table+summary+footer block.
@@ -76,11 +85,16 @@ fn bar_style() -> ProgressStyle {
 /// Returns an error if the DP scratch allocation fails (the budget
 /// estimate is reported in the message so the user can adjust
 /// `--max-length` or `--memory-limit`).
+///
+/// # Panics
+/// Panics if `grid.points.len()` exceeds [`mask::MAX_POINTS`]; callers
+/// must run [`andlock::grid::GridDefinition::validate`] first (the CLI
+/// front door does so unconditionally).
 pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
     let RunOptions {
         min_length,
         max_length,
-        memory_limit,
+        memory_limit: _,
         quiet,
         human,
     } = opts;
@@ -89,8 +103,94 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
     let dim = grid.dimensions;
     let mp = tty::progress();
 
+    let width = pick_width(n);
+
     let block_pb = build_block_spinner(mp, n, dim, quiet);
-    let blocks = compute_blocks(grid);
+
+    let outcome = match width {
+        Width::U32 => run_dp_sequence::<u32>(grid, n, opts, mp, block_pb.as_ref()),
+        Width::U64 => run_dp_sequence::<u64>(grid, n, opts, mp, block_pb.as_ref()),
+        Width::U128 => run_dp_sequence::<u128>(grid, n, opts, mp, block_pb.as_ref()),
+    }?;
+
+    print_report(ReportInputs {
+        entries: &outcome.entries,
+        counts: &outcome.counts,
+        n,
+        min_length,
+        max_length,
+        effective: outcome.effective,
+        human,
+    });
+    if !quiet {
+        let footer_outcome = match outcome.clamp {
+            Some(_) => RunOutcome::Clamped {
+                effective: outcome.effective,
+            },
+            None => RunOutcome::Complete,
+        };
+        print_footer(footer_outcome, outcome.elapsed);
+    }
+    Ok(())
+}
+
+/// Picks the dispatcher width for a grid of `n` points.
+///
+/// Delegates to [`mask::smallest_for`] for the ladder so the boundary
+/// logic lives in exactly one place.
+///
+/// # Panics
+/// Panics when `n > mask::MAX_POINTS`. Callers must run
+/// [`andlock::grid::GridDefinition::validate`] first (the CLI front
+/// door does so unconditionally), which rejects oversized grids with a
+/// user-facing error before they reach this dispatcher — so the panic
+/// is a defensive trip-wire rather than a reachable code path.
+const fn pick_width(n: usize) -> Width {
+    match mask::smallest_for(n) {
+        Some(w) => w,
+        None => panic!(
+            "pick_width called with n past mask::MAX_POINTS — \
+             GridDefinition::validate must run before run_pipeline"
+        ),
+    }
+}
+
+/// Bundles the per-run outputs the [`run_pipeline`] finalisation phase
+/// needs. Built inside the width-dispatched [`run_dp_sequence`] so the
+/// generic [`Mask`]-typed buffers stay encapsulated; the printing
+/// pipeline operates on the `Vec<u128>` and `Vec<(usize, u128)>` views
+/// the renderer accepts.
+struct DpRunOutcome {
+    counts: Vec<u128>,
+    entries: Vec<(usize, u128)>,
+    effective: usize,
+    clamp: Option<(u64, u64)>,
+    elapsed: Duration,
+}
+
+/// Width-specialised driver: builds the block matrix, finishes the
+/// build spinner, runs the memory clamp + DP, and collects everything
+/// the M-independent finalisation phase needs.
+///
+/// Generic over [`Mask`]; the runtime caller in [`run_pipeline`]
+/// dispatches to this function once per supported width so each
+/// monomorphisation stays specialised for its bitmask integer type.
+fn run_dp_sequence<M: Mask>(
+    grid: &GridDefinition,
+    n: usize,
+    opts: RunOptions,
+    mp: &MultiProgress,
+    block_pb: Option<&ProgressBar>,
+) -> Result<DpRunOutcome> {
+    let RunOptions {
+        min_length,
+        max_length,
+        memory_limit,
+        quiet,
+        human,
+    } = opts;
+
+    let blocks: Vec<M> = compute_blocks(grid);
     if let Some(pb) = block_pb {
         pb.finish_and_clear();
     }
@@ -100,7 +200,7 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
     // the memory clamp in that case avoids truncating the run to a length
     // it could trivially compute — e.g. `grid 0 -f 31` ran into the
     // 143 GiB DP estimate even though no DP would actually run.
-    let unconstrained = blocks.iter().all(|&b| b == 0);
+    let unconstrained = blocks.iter().all(|&b| b == M::ZERO);
     let (effective, clamp) = resolve_memory_budget(n, max_length, memory_limit, unconstrained);
 
     if !quiet && let Some((needed, budget)) = clamp {
@@ -116,36 +216,21 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
         effective,
     };
     let t1 = Instant::now();
-    let counts = drive_dp(dp, count_pb.as_ref(), &mut printer)?;
+    let counts = drive_dp::<M>(dp, count_pb.as_ref(), &mut printer)?;
     let elapsed = t1.elapsed();
 
-    // `finish` clears the live row/header bars in live mode (so the
-    // region is empty before we paint the static block) and returns
-    // the collected entries; `render_final` then produces a single
-    // unified layout where the table and the `Total`/`Points` summary
-    // rows share the same right-edge.
     let entries = printer.finish();
     if let Some(pb) = count_pb {
         pb.finish_and_clear();
     }
 
-    print_report(ReportInputs {
-        entries: &entries,
-        counts: &counts,
-        n,
-        min_length,
-        max_length,
+    Ok(DpRunOutcome {
+        counts,
+        entries,
         effective,
-        human,
-    });
-    if !quiet {
-        let outcome = match clamp {
-            Some(_) => RunOutcome::Clamped { effective },
-            None => RunOutcome::Complete,
-        };
-        print_footer(outcome, elapsed);
-    }
-    Ok(())
+        clamp,
+        elapsed,
+    })
 }
 
 /// Prints the memory-clamp warning to stderr at the start of the run so
@@ -168,9 +253,9 @@ fn print_clamp_warning(effective: usize, needed: u64, budget: u64) {
 /// per-pair block matrix, and the resolved `effective` cap. Bundled so
 /// `drive_dp`'s signature stays narrow as the counter grows new knobs.
 #[derive(Copy, Clone)]
-struct DpInputs<'a> {
+struct DpInputs<'a, M: Mask> {
     n: usize,
-    blocks: &'a [u32],
+    blocks: &'a [M],
     effective: usize,
 }
 
@@ -247,8 +332,8 @@ fn dp_progress_message(current: usize, effective: usize, n: usize, mem_bytes: u6
 /// ticks to `count_pb` and finalized lengths to `printer`. Each
 /// `LengthDone` also rewrites the bar's message so the "length X of Y"
 /// counter advances in lock-step with the underlying DP.
-fn drive_dp(
-    dp: DpInputs<'_>,
+fn drive_dp<M: Mask>(
+    dp: DpInputs<'_, M>,
     count_pb: Option<&ProgressBar>,
     printer: &mut LengthPrinter<'_>,
 ) -> Result<Vec<u128>> {
@@ -258,7 +343,7 @@ fn drive_dp(
         effective,
     } = dp;
     let mem_est = dp_table_bytes(n, effective);
-    let mut scratch = allocate_scratch(n, blocks, effective).map_err(|e| {
+    let mut scratch = allocate_scratch::<M>(n, blocks, effective).map_err(|e| {
         anyhow!(
             "could not allocate ~{} of RAM for the DP buffers: {e}. \
              Lower --max-length or pass --memory-limit to clamp the run to a smaller cap.",
@@ -336,17 +421,30 @@ enum RunOutcome {
 /// In release builds this is a transparent forward; the debug-only
 /// hatch substitutes hostile inputs that saturate the underlying
 /// `try_reserve_exact` and surface a real `TryReserveError`.
-fn allocate_scratch(
+///
+/// The hostile inputs are M-typed so each width's monomorphisation of
+/// [`DpScratch::allocate`] is exercised honestly — `allocate_scratch::<u64>`
+/// drives `DpScratch::allocate::<u64>`, not the `u32` instantiation.
+fn allocate_scratch<M: Mask>(
     n: usize,
-    blocks: &[u32],
+    blocks: &[M],
     effective: usize,
 ) -> Result<DpScratch, std::collections::TryReserveError> {
     #[cfg(debug_assertions)]
     if std::env::var_os("ANDLOCK_FORCE_PIPELINE_ERROR").is_some() {
-        let hostile = vec![1u32; 64 * 64];
-        return DpScratch::allocate(64, &hostile, 64);
+        // `HOSTILE_N = 128` sits one past the widest mask ceiling, so
+        // `dp_layer_capacity(128, 128)` saturates regardless of `M` and
+        // the underlying `try_reserve_exact` rejects the request. The
+        // alloc step short-circuits before any `n <= MAX_POINTS` assert
+        // inside `count_patterns_dp` would fire.
+        const HOSTILE_N: usize = 128;
+        let mut hostile = vec![M::ZERO; HOSTILE_N * HOSTILE_N];
+        // Defeat the all-zero shortcut inside `DpScratch::allocate` so
+        // `dp_layer_capacity` actually runs.
+        hostile[0] = M::bit(0);
+        return DpScratch::allocate::<M>(HOSTILE_N, &hostile, HOSTILE_N);
     }
-    DpScratch::allocate(n, blocks, effective)
+    DpScratch::allocate::<M>(n, blocks, effective)
 }
 
 /// Stderr footer: clamp explanation (when applicable) plus elapsed time.
@@ -385,7 +483,7 @@ mod tests {
             effective: 64,
         };
 
-        let err = drive_dp(dp, None, &mut printer).unwrap_err();
+        let err = drive_dp::<u32>(dp, None, &mut printer).unwrap_err();
         let msg = format!("{err}");
         assert!(
             msg.contains("could not allocate"),
@@ -418,5 +516,83 @@ mod tests {
             length_idx < points_idx && points_idx < mem_idx,
             "message order must be length → points → memory, got: {msg}",
         );
+    }
+
+    /// `pick_width` walks the `(u32, u64, u128)` ladder so the
+    /// existing fast path stays on `u32` for any `n` ≤ 31 and the
+    /// wider widths only engage when strictly necessary.
+    #[test]
+    fn pick_width_walks_widths_in_order() {
+        assert_eq!(pick_width(0), Width::U32);
+        assert_eq!(pick_width(31), Width::U32);
+        assert_eq!(pick_width(32), Width::U64);
+        assert_eq!(pick_width(63), Width::U64);
+        assert_eq!(pick_width(64), Width::U128);
+        assert_eq!(pick_width(127), Width::U128);
+    }
+
+    /// `pick_width` panics past `mask::MAX_POINTS` rather than silently
+    /// dispatching to a width that would then panic deeper inside
+    /// `compute_blocks`. `validate()` rejects oversized grids before
+    /// `run_pipeline`, so the panic is unreachable in normal flow —
+    /// pinning it here guards against a future refactor that would
+    /// reintroduce the silent fallback.
+    #[test]
+    #[should_panic(expected = "GridDefinition::validate must run")]
+    fn pick_width_panics_past_max_points() {
+        let _ = pick_width(mask::MAX_POINTS + 1);
+    }
+
+    /// `run_pipeline` end-to-end on a small `u32`-width grid. Pinning
+    /// the success path inside the binary's own test harness
+    /// instantiation keeps the `Width::U32` arm of the dispatcher and
+    /// the surrounding `?` continuation covered without depending on a
+    /// subprocess invocation. Output goes to stdout/stderr through the
+    /// `MultiProgress` global; cargo test captures both.
+    #[test]
+    fn run_pipeline_succeeds_on_small_u32_grid() {
+        use andlock::grid::build_grid_definition;
+        let grid = build_grid_definition(&[3, 3], 0);
+        let opts = RunOptions {
+            min_length: 0,
+            max_length: grid.points.len(),
+            memory_limit: Some(64 * 1024 * 1024),
+            quiet: true,
+            human: false,
+        };
+        run_pipeline(&grid, opts).unwrap();
+    }
+
+    /// Symmetric `Width::U64` check: a 32-point line forces dispatch
+    /// through the wider monomorphisation. We cap `--max-length` to
+    /// keep the run trivial; the goal is only to land in the
+    /// `Width::U64` arm with a successful return.
+    #[test]
+    fn run_pipeline_succeeds_on_small_u64_grid() {
+        use andlock::grid::build_grid_definition;
+        let grid = build_grid_definition(&[1, 32], 0);
+        let opts = RunOptions {
+            min_length: 0,
+            max_length: 3,
+            memory_limit: Some(64 * 1024 * 1024),
+            quiet: true,
+            human: false,
+        };
+        run_pipeline(&grid, opts).unwrap();
+    }
+
+    /// Symmetric `Width::U128` check.
+    #[test]
+    fn run_pipeline_succeeds_on_small_u128_grid() {
+        use andlock::grid::build_grid_definition;
+        let grid = build_grid_definition(&[1, 64], 0);
+        let opts = RunOptions {
+            min_length: 0,
+            max_length: 2,
+            memory_limit: Some(64 * 1024 * 1024),
+            quiet: true,
+            human: false,
+        };
+        run_pipeline(&grid, opts).unwrap();
     }
 }
