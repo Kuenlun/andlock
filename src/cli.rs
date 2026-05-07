@@ -112,7 +112,7 @@ enum Command {
         /// Add N isolated points not collinear with any grid pair.
         ///
         /// Each free point lives on its own extra dimension to guarantee
-        /// non-collinearity. Total grid + free points must not exceed 31.
+        /// non-collinearity. Total grid + free points must not exceed 127.
         #[arg(short = 'f', long, default_value_t = 0, value_name = "N")]
         free_points: usize,
 
@@ -147,7 +147,7 @@ enum Command {
     },
     /// Count patterns on a grid loaded from JSON.
     ///
-    /// Loads a `GridDefinition` (0-31 points) from <PATH> and counts its
+    /// Loads a `GridDefinition` (0-127 points) from <PATH> and counts its
     /// patterns. 1D and 2D grids that fit ~40x20 cells get an ASCII preview.
     /// Pass `-` as <PATH> to read from stdin.
     #[command(after_long_help = FILE_EXAMPLES)]

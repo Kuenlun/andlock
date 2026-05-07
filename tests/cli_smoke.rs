@@ -124,6 +124,35 @@ fn pipeline_error_propagates_from_file_subcommand() {
 }
 
 #[test]
+fn pipeline_error_propagates_at_u64_grid_width() {
+    // The debug-only `ANDLOCK_FORCE_PIPELINE_ERROR` hatch lives inside
+    // `allocate_scratch::<M>` and exists in every monomorphisation;
+    // exercising it with a u64-width grid (`1x32` → 32 points) covers
+    // the hatch in the `Width::U64` branch of the dispatcher.
+    common::bin()
+        .env("ANDLOCK_FORCE_PIPELINE_ERROR", "1")
+        .args(["grid", "1x32", "--quiet"])
+        .assert()
+        .failure()
+        .stderr(contains("could not allocate"))
+        .stderr(contains("--max-length"));
+}
+
+#[test]
+fn pipeline_error_propagates_at_u128_grid_width() {
+    // Symmetric u128-width hatch test (`1x64` → 64 points) — covers
+    // `allocate_scratch::<u128>`'s debug short-circuit so the third
+    // monomorphisation has its early-return reached at least once.
+    common::bin()
+        .env("ANDLOCK_FORCE_PIPELINE_ERROR", "1")
+        .args(["grid", "1x64", "--quiet"])
+        .assert()
+        .failure()
+        .stderr(contains("could not allocate"))
+        .stderr(contains("--max-length"));
+}
+
+#[test]
 fn happy_path_3x3_exits_zero_with_non_empty_stdout() {
     let assert = common::bin()
         .args(["grid", "3x3", "--quiet"])

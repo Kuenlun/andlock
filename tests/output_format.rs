@@ -110,7 +110,8 @@ fn exit_codes_match_documented_convention() {
     // 0 — success.
     bin().args(["grid", "3x3", "--quiet"]).assert().code(0);
     // 1 — runtime error (validation here is a runtime, not clap, error).
-    bin().args(["grid", "6x6"]).assert().code(1);
+    // 12x12 = 144 points exceeds the 127-point ceiling.
+    bin().args(["grid", "12x12"]).assert().code(1);
     // 2 — clap parse error.
     bin().args(["grid", "3x3", "--bogus-flag"]).assert().code(2);
 }

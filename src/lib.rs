@@ -27,3 +27,4 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
 pub mod canonicalizer;
 pub mod counter;
 pub mod grid;
+pub mod mask;

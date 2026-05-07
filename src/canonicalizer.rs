@@ -223,7 +223,7 @@ mod tests {
 
     fn counts_of(g: &GridDefinition) -> Vec<u128> {
         g.validate().unwrap();
-        let blocks = compute_blocks(g);
+        let blocks = compute_blocks::<u32>(g);
         let n = g.points.len();
         let mut scratch = DpScratch::allocate(n, &blocks, n).unwrap();
         count_patterns_dp(&mut scratch, n, &blocks, n, |_| {})

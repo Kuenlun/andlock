@@ -20,11 +20,14 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::mask::Mask;
+
 /// Hard upper bound on the number of nodes the program accepts.
 ///
-/// The DP algorithm represents the visited set as a `u32` bitmask, so
-/// `1u32 << n` must not overflow — limiting `n` to at most 31.
-pub const MAX_POINTS: usize = 31;
+/// Re-exported from [`crate::mask::MAX_POINTS`] so callers can name a
+/// single ceiling without having to know which mask width the dispatcher
+/// will pick at runtime. Equal to `<u128 as Mask>::MAX_POINTS = 127`.
+pub use crate::mask::MAX_POINTS;
 
 /// Finite set of integer-coordinate nodes in `dimensions`-dimensional space.
 #[derive(Clone, Serialize, Deserialize)]
@@ -69,14 +72,26 @@ impl GridDefinition {
 }
 
 /// Returns a flat `n × n` row-major matrix where `blocks[a * n + b]` is the
-/// bitmask of nodes lying strictly on the open segment `(a, b)`.
+/// bitmask of nodes lying strictly on the open segment `(a, b)`, encoded
+/// in the [`Mask`] type the caller selects.
 ///
 /// The matrix is symmetric: `blocks[a * n + b] == blocks[b * n + a]`.
+///
+/// # Panics
+/// Panics if `grid.points.len() > M::MAX_POINTS` — callers are expected
+/// to pick `M` via [`crate::mask::smallest_for`] (or the equivalent
+/// ladder) so the chosen width can hold the grid; this assertion is a
+/// safety net rather than a documented user-facing error.
 #[must_use]
-pub fn compute_blocks(grid: &GridDefinition) -> Vec<u32> {
+pub fn compute_blocks<M: Mask>(grid: &GridDefinition) -> Vec<M> {
     let n = grid.points.len();
+    assert!(
+        n <= M::MAX_POINTS,
+        "compute_blocks called with n={n} > Mask::MAX_POINTS={}",
+        M::MAX_POINTS,
+    );
     let dim = grid.dimensions;
-    let mut blocks = vec![0u32; n * n];
+    let mut blocks: Vec<M> = vec![M::ZERO; n * n];
 
     for a in 0..n {
         let origin = &grid.points[a];
@@ -110,7 +125,7 @@ pub fn compute_blocks(grid: &GridDefinition) -> Vec<u32> {
                 });
 
                 if collinear {
-                    let c_bit = 1u32 << c;
+                    let c_bit = M::bit(c);
                     blocks[a * n + b] |= c_bit;
                     blocks[b * n + a] |= c_bit;
                 }
@@ -254,7 +269,7 @@ mod tests {
     #[test]
     fn linear_triplet_records_midpoint_as_blocker() {
         let g = grid(2, vec![vec![0, 0], vec![1, 0], vec![2, 0]]);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         let b_bit = 1u32 << 1;
         assert_eq!(blocks[2], b_bit); // A → C
         assert_eq!(blocks[6], b_bit); // C → A
@@ -266,7 +281,7 @@ mod tests {
     fn bounding_box_alone_does_not_imply_collinearity() {
         // A=(0,0), B=(2,2), probe=(1,0): in the box, not on the diagonal.
         let g = grid(2, vec![vec![0, 0], vec![2, 2], vec![1, 0]]);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert_eq!(blocks[1], 0);
         assert_eq!(blocks[3], 0);
     }
@@ -274,7 +289,7 @@ mod tests {
     #[test]
     fn collinearity_detected_in_three_dimensions() {
         let g = grid(3, vec![vec![0, 0, 0], vec![1, 1, 1], vec![2, 2, 2]]);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         let b_bit = 1u32 << 1;
         assert_eq!(blocks[2], b_bit);
         assert_eq!(blocks[6], b_bit);
@@ -284,7 +299,7 @@ mod tests {
     fn diverging_third_axis_is_not_collinear() {
         // A=(0,0,0), B=(2,2,2), probe=(1,1,0): xy agrees, z does not.
         let g = grid(3, vec![vec![0, 0, 0], vec![2, 2, 2], vec![1, 1, 0]]);
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         assert_eq!(blocks[1], 0);
     }
 
@@ -299,12 +314,39 @@ mod tests {
                 vec![0, 2], vec![1, 2], vec![2, 2],
             ],
         );
-        let blocks = compute_blocks(&g);
+        let blocks = compute_blocks::<u32>(&g);
         let n = g.points.len();
         for a in 0..n {
             for b in 0..n {
                 assert_eq!(blocks[a * n + b], blocks[b * n + a]);
             }
+        }
+    }
+
+    /// `compute_blocks` is generic over the [`Mask`] type so the same
+    /// geometric logic populates `Vec<u64>` or `Vec<u128>` for grids
+    /// past the `u32` ceiling. The widened encoding must agree
+    /// bit-for-bit with the `u32` output on any grid both representations
+    /// can hold — this catches a future impl that miswires the
+    /// position-to-bit mapping at the trait boundary.
+    #[test]
+    fn compute_blocks_widths_agree_on_overlapping_range() {
+        #[rustfmt::skip]
+        let g = grid(
+            2,
+            vec![
+                vec![0, 0], vec![1, 0], vec![2, 0],
+                vec![0, 1], vec![1, 1], vec![2, 1],
+                vec![0, 2], vec![1, 2], vec![2, 2],
+            ],
+        );
+        let as_u32: Vec<u32> = compute_blocks(&g);
+        let as_u64: Vec<u64> = compute_blocks(&g);
+        let as_u128: Vec<u128> = compute_blocks(&g);
+
+        for (i, &b32) in as_u32.iter().enumerate() {
+            assert_eq!(u64::from(b32), as_u64[i]);
+            assert_eq!(u128::from(b32), as_u128[i]);
         }
     }
 
