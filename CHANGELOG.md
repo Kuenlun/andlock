@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/Kuenlun/andlock/compare/v0.3.0...v0.4.0) - 2026-05-07
+
+### Added
+
+- *(mask)* [**breaking**] extend point ceiling to 127 via generic mask widths ([#39](https://github.com/Kuenlun/andlock/pull/39))
+- *(pipeline)* surface clamp warning up front and live dp length ([#38](https://github.com/Kuenlun/andlock/pull/38))
+
+### Other
+
+- *(pipeline)* align progress bars with cargo's status-line layout ([#36](https://github.com/Kuenlun/andlock/pull/36))
+
 ## [0.3.0](https://github.com/Kuenlun/andlock/compare/v0.2.1...v0.3.0) - 2026-05-02
 
 ### Added
