@@ -91,7 +91,7 @@ jobs:
 
       - name: Install Rust toolchain (dry-run)
         if: github.event_name == 'workflow_dispatch' && inputs.dry_run
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-04-15
         with:
           targets: ${{ matrix.target }}
 
@@ -133,7 +133,7 @@ jobs:
 
       - name: Install Rust toolchain (release)
         if: github.event_name == 'push'
-        uses: dtolnay/rust-toolchain@nightly
+        uses: dtolnay/rust-toolchain@nightly-2026-04-15
         with:
           targets: ${{ matrix.target }}
 
