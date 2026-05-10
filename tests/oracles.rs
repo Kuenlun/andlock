@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: MIT OR Apache-2.0
+// andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
+// Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
+
 // Numerical oracles at the binary boundary.
 //
 // Unit tests already pin the DP's per-length output for 3x3; these tests
