@@ -21,18 +21,16 @@ if ! ./.github/check-license-headers.sh; then
   exit 1
 fi
 
-if [ "${ANDLOCK_SKIP_COVERAGE:-0}" = "1" ]; then
-  echo "Skipping coverage gate (ANDLOCK_SKIP_COVERAGE=1)."
+if [ "${SKIP_COVERAGE:-0}" = "1" ]; then
+  echo "Skipping coverage gate (SKIP_COVERAGE=1)."
 else
   echo "Running 100% coverage check (cargo llvm-cov --branch)..."
 
-  # lockpick does not yet expose coverage gating, so we enforce it here
-  # via a shared script that CI also runs (.github/workflows/rust.yml).
   if ! ./.github/check-coverage.sh; then
     echo ""
     echo "ERROR: Coverage gate failed. Commit aborted."
-    echo "Run 'cargo cov' for the HTML report and add the missing tests."
-    echo "Set ANDLOCK_SKIP_COVERAGE=1 to bypass this check temporarily."
+    echo "Run 'cargo llvm-cov --branch --html' for the HTML report (target/llvm-cov/html/index.html) and add the missing tests."
+    echo "Set SKIP_COVERAGE=1 to bypass this check temporarily."
     exit 1
   fi
 fi
