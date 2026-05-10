@@ -26,7 +26,7 @@ if [ -z "$PYTHON_BIN" ]; then
   exit 1
 fi
 
-COVERAGE_JSON="$(mktemp -t andlock-coverage.XXXXXX)"
+COVERAGE_JSON="$(mktemp -t coverage.XXXXXX)"
 trap 'rm -f "$COVERAGE_JSON"' EXIT
 
 if ! cargo llvm-cov --branch --json --summary-only --output-path "$COVERAGE_JSON" >/dev/null; then
@@ -102,7 +102,7 @@ PY
 then
   echo ""
   echo "ERROR: Coverage is not 100%."
-  echo "Run 'cargo cov' for the HTML report and add the missing tests."
+  echo "Run 'cargo llvm-cov --branch --html' for the HTML report (target/llvm-cov/html/index.html) and add the missing tests."
   exit 1
 fi
 
