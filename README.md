@@ -27,3 +27,23 @@ To form a valid pattern, the sequence of nodes must strictly adhere to the follo
 If we were to ignore the visibility constraint (Rule 3), any sequence of distinct nodes would be valid, and the total count of patterns over N nodes would be exactly `floor(e · N!)`.
 
 While Rule 3 filters out invalid intersections and strictly reduces this number, the total count still scales factorially — remaining roughly on the order of `O(N!)`. Because of this combinatorial explosion, computing the exact number of valid patterns becomes incredibly computationally expensive as N grows.
+
+---
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or
+  <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally
+submitted for inclusion in the work by you, as defined in the
+Apache-2.0 license, shall be dual licensed as above, without any
+additional terms or conditions.
