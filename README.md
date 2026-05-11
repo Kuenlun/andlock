@@ -1,5 +1,11 @@
 # andlock
 
+[![CI](https://github.com/Kuenlun/andlock/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/Kuenlun/andlock/actions/workflows/rust.yml)
+[![codecov](https://codecov.io/gh/Kuenlun/andlock/branch/master/graph/badge.svg)](https://codecov.io/gh/Kuenlun/andlock)
+[![Crates.io](https://img.shields.io/crates/v/andlock.svg)](https://crates.io/crates/andlock)
+[![Docs.rs](https://docs.rs/andlock/badge.svg)](https://docs.rs/andlock)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
+
 A Rust program that counts all valid patterns over a set of nodes in n-dimensional space, generalizing the Android unlock pattern into a purely mathematical combinatorics problem.
 
 ---
