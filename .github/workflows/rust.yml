@@ -3,6 +3,8 @@ name: Rust
 on:
   pull_request:
     branches: ["master", "develop"]
+  push:
+    branches: ["master"]
 
 env:
   CARGO_TERM_COLOR: always
@@ -46,6 +48,14 @@ jobs:
           tool: cargo-llvm-cov
       - name: Enforce 100% coverage
         run: ./.github/check-coverage.sh
+      - name: Generate LCOV report from cached profdata
+        run: cargo llvm-cov report --branch --lcov --output-path lcov.info
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: true
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   merge-gate:
     runs-on: ubuntu-latest
