@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/Kuenlun/andlock/compare/v0.3.0...v0.4.0) - 2026-05-16
+
+### Added
+
+- *(mask)* [**breaking**] extend point ceiling to 127 via generic mask widths ([#39](https://github.com/Kuenlun/andlock/pull/39))
+- *(pipeline)* surface clamp warning up front and live dp length ([#38](https://github.com/Kuenlun/andlock/pull/38))
+
+### Other
+
+- *(license)* delegate header check to lockpick ([#47](https://github.com/Kuenlun/andlock/pull/47))
+- *(coverage)* publish reports to codecov and add status badges ([#46](https://github.com/Kuenlun/andlock/pull/46))
+- tighten repo hygiene and pin toolchain components ([#45](https://github.com/Kuenlun/andlock/pull/45))
+- *(toolchain)* pin nightly rust to 2026-04-15 ([#44](https://github.com/Kuenlun/andlock/pull/44))
+- *(ci)* make coverage and license-header scripts project-portable ([#43](https://github.com/Kuenlun/andlock/pull/43))
+- *(coverage)* enforce 100% coverage gate in CI via shared script ([#41](https://github.com/Kuenlun/andlock/pull/41))
+- relicense to MIT OR Apache-2.0 ([#40](https://github.com/Kuenlun/andlock/pull/40))
+- *(pipeline)* align progress bars with cargo's status-line layout ([#36](https://github.com/Kuenlun/andlock/pull/36))
+
 ## [0.3.0](https://github.com/Kuenlun/andlock/compare/v0.2.1...v0.3.0) - 2026-05-02
 
 ### Added
