@@ -6,6 +6,11 @@ description = "Rust tool to count Android unlock patterns on n-dimensional nodes
 repository = "https://github.com/Kuenlun/andlock"
 authors = ["Juan Luis Leal Contreras <kuenlunleal@gmail.com>"]
 license = "MIT OR Apache-2.0"
+keywords = ["android", "pattern", "unlock", "combinatorics", "counter"]
+categories = ["algorithms", "command-line-utilities", "mathematics"]
+
+[package.metadata.lockpick]
+license-header = ".github/license_header.rs"
 
 [dependencies]
 anyhow = "1.0.102"
