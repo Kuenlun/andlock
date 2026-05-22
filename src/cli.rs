@@ -9,10 +9,11 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow};
 use clap::{Args, Parser, Subcommand};
 
+use std::fmt::Write as _;
+
 use andlock::canonicalizer::canonicalize;
 use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
 
-use crate::json_format::pretty_compact_json_value;
 use crate::pipeline::{RunOptions, run_pipeline};
 use crate::preview::render_preview;
 
@@ -267,7 +268,7 @@ pub fn run() -> Result<()> {
 
             if export_json {
                 warn_ignored_range(&range, quiet);
-                println!("{}", pretty_compact_json_value(&grid_as_value(&grid)));
+                println!("{}", grid_to_json(&grid));
                 return Ok(());
             }
 
@@ -304,7 +305,7 @@ pub fn run() -> Result<()> {
             if export_json {
                 warn_ignored_range(&range, quiet);
                 let out = if simplify { canonicalize(&grid) } else { grid };
-                println!("{}", pretty_compact_json_value(&grid_as_value(&out)));
+                println!("{}", grid_to_json(&out));
                 return Ok(());
             }
 
@@ -330,25 +331,30 @@ pub fn run() -> Result<()> {
     Ok(())
 }
 
-/// Converts a [`GridDefinition`] into a [`serde_json::Value`] without
-/// going through the fallible [`serde_json::to_value`]. The raw fields
-/// (`usize` and `Vec<Vec<i32>>`) all have infallible `Into<Value>`
-/// impls, so this round-trips bit-for-bit identical JSON to the
-/// `Serialize`-derived path while letting the export path skip the
-/// `?` operator and its unreachable Err arm.
-fn grid_as_value(grid: &GridDefinition) -> serde_json::Value {
-    let points: Vec<serde_json::Value> = grid
-        .points
-        .iter()
-        .map(|p| serde_json::Value::Array(p.iter().map(|&n| serde_json::Value::from(n)).collect()))
-        .collect();
-    let mut obj = serde_json::Map::with_capacity(2);
-    obj.insert(
-        "dimensions".to_owned(),
-        serde_json::Value::from(grid.dimensions),
+/// Serializes a [`GridDefinition`] as JSON with each coordinate vector
+/// inlined on a single line, matching the layout consumed by `andlock file`.
+fn grid_to_json(grid: &GridDefinition) -> String {
+    let mut s = String::new();
+    let _ = write!(
+        s,
+        "{{\n  \"dimensions\": {},\n  \"points\": [",
+        grid.dimensions
     );
-    obj.insert("points".to_owned(), serde_json::Value::Array(points));
-    serde_json::Value::Object(obj)
+    for (i, p) in grid.points.iter().enumerate() {
+        s.push_str(if i == 0 { "\n    [" } else { ",\n    [" });
+        for (j, c) in p.iter().enumerate() {
+            if j > 0 {
+                s.push_str(", ");
+            }
+            let _ = write!(s, "{c}");
+        }
+        s.push(']');
+    }
+    if !grid.points.is_empty() {
+        s.push_str("\n  ");
+    }
+    s.push_str("]\n}");
+    s
 }
 
 /// Reads the grid source: stdin when `path == "-"`, otherwise the file
