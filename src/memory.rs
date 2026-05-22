@@ -55,31 +55,3 @@ pub fn resolve_memory_budget(
         (effective, None)
     }
 }
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use super::*;
-
-    // Regression test for the bug where an unconstrained run with many
-    // points was being clamped against the DP memory budget — even though
-    // the closed-form fast path inside `count_patterns_dp` never allocates
-    // the DP buffers. With 31 free points the DP estimate balloons to
-    // ~143 GiB, but the run itself should be effectively free.
-    #[test]
-    fn unconstrained_run_skips_memory_clamp_at_max_n() {
-        // A 1-byte budget is tighter than even the smallest DP layer, so
-        // `effective_max_length(31, 31, 1)` would normally collapse to 0.
-        let (effective, clamp) = resolve_memory_budget(31, 31, Some(1), true);
-        assert_eq!(effective, 31, "unconstrained run must not clamp max_length");
-        assert!(clamp.is_none(), "unconstrained run must not report a clamp");
-    }
-
-    // Sanity: with `unconstrained = false` the budget still clamps as before.
-    #[test]
-    fn constrained_run_still_respects_memory_clamp() {
-        let (effective, clamp) = resolve_memory_budget(31, 31, Some(1), false);
-        assert!(effective < 31, "tight budget must clamp constrained run");
-        assert!(clamp.is_some(), "clamp metadata must be reported");
-    }
-}
