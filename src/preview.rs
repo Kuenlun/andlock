@@ -2,11 +2,9 @@
 // andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
-//! Terminal preview renderer for low-dimensional point patterns.
-//!
-//! Renders 0D, 1D, and 2D base grids using `●` and free points using `★`.
-//! Silently returns `None` when the grid is too large or too high-dimensional
-//! to display meaningfully.
+//! Terminal preview renderer for 0D / 1D / 2D base grids. Base nodes show as
+//! `●`, free points as `★`. Silently returns `None` for grids that are too
+//! large or too high-dimensional to display meaningfully.
 
 use std::collections::HashSet;
 
@@ -17,37 +15,32 @@ const MAX_DISPLAY_COLS: usize = 40;
 const MAX_DISPLAY_ROWS: usize = 20;
 const MARGIN: &str = "    ";
 
-/// Scan trailing dimensions for the "exactly one value = 1, all others = 0"
-/// signature that identifies free-point dimensions produced by `build_grid_definition`.
-/// Stops at the first dim that does not match, so only a contiguous suffix is counted.
+/// Counts trailing dimensions matching the free-point signature emitted by
+/// `build_grid_definition`: exactly one coordinate = 1, every other = 0.
 fn detect_free_dims(grid: &GridDefinition) -> usize {
-    let mut count = 0;
-    for d in (0..grid.dimensions).rev() {
-        let (ones, non_zeros) = grid.points.iter().fold((0_usize, 0_usize), |(o, nz), p| {
-            let v = p[d];
-            if v == 1 {
-                (o + 1, nz + 1)
-            } else if v != 0 {
-                (o, nz + 1)
-            } else {
-                (o, nz)
+    (0..grid.dimensions)
+        .rev()
+        .take_while(|&d| {
+            let mut ones = 0usize;
+            let mut non_zero = 0usize;
+            for p in &grid.points {
+                match p[d] {
+                    0 => {}
+                    1 => {
+                        ones += 1;
+                        non_zero += 1;
+                    }
+                    _ => non_zero += 1,
+                }
             }
-        });
-        if ones == 1 && non_zeros == 1 {
-            count += 1;
-        } else {
-            break;
-        }
-    }
-    count
+            ones == 1 && non_zero == 1
+        })
+        .count()
 }
 
-/// Build the terminal preview string for `grid`, or `None` to skip silently.
-///
-/// `known_free_dims` must be set to the number of free-point dimensions when
-/// the grid was produced by the `grid` subcommand (already canonical).  Pass
-/// `None` for user-provided grids: a canonical copy is made internally for
-/// display purposes without touching the original.
+/// Build the preview string for `grid`, or `None` to skip silently. Pass
+/// `known_free_dims = Some(n)` when the grid was freshly built by the `grid`
+/// subcommand (already canonical); pass `None` for user-provided grids.
 #[must_use]
 pub fn render_preview(grid: &GridDefinition, known_free_dims: Option<usize>) -> Option<String> {
     let canonical_grid = known_free_dims.is_none().then(|| canonicalize(grid));
@@ -55,18 +48,13 @@ pub fn render_preview(grid: &GridDefinition, known_free_dims: Option<usize>) -> 
 
     let free_dims = known_free_dims.unwrap_or_else(|| detect_free_dims(display_grid));
     let base_dims = display_grid.dimensions.saturating_sub(free_dims);
-
-    // Abort silently for 3D+ base grids
     if base_dims > 2 {
         return None;
     }
 
-    // Partition base vs free points.
-    // For generated grids (known_free_dims is Some): build_grid_definition always places
-    // base points first and free points last, and canonicalize preserves that order.
-    // We split positionally so that free points translated to all-zeros by canonicalize
-    // (which happens when there are zero base points) are still counted as free.
-    // For user-provided grids: identify base points structurally by all-zero free-dim slots.
+    // Generated grids preserve the base-then-free order, so a positional split
+    // works even after canonicalisation zeroes the free-coordinate row. User
+    // grids need the all-zero-tail filter instead.
     let n_base = display_grid.points.len().saturating_sub(free_dims);
     let base_points: Vec<&Vec<i32>> = if known_free_dims.is_some() {
         display_grid.points[..n_base].iter().collect()
@@ -79,58 +67,46 @@ pub fn render_preview(grid: &GridDefinition, known_free_dims: Option<usize>) -> 
     };
     let n_free = display_grid.points.len() - base_points.len();
 
-    // 0D base (or degenerate empty base): render only the free-point stars
     if base_dims == 0 || base_points.is_empty() {
-        if n_free == 0 {
-            return None;
-        }
-        return Some(vec!["★"; n_free].join(" "));
+        return (n_free > 0).then(|| vec!["★"; n_free].join(" "));
     }
 
-    // Unique x-coordinates (dim 0), ascending
-    let xs: Vec<i32> = {
-        let mut v: Vec<i32> = base_points.iter().map(|p| p[0]).collect();
-        v.sort_unstable();
-        v.dedup();
-        v
-    };
-
-    // Unique y-coordinates (dim 1 for 2D; single dummy row for 1D), descending
-    let ys: Vec<i32> = if base_dims >= 2 {
-        let mut v: Vec<i32> = base_points.iter().map(|p| p[1]).collect();
-        v.sort_unstable_by(|a, b| b.cmp(a));
-        v.dedup();
-        v
+    let xs = unique_sorted(base_points.iter().map(|p| p[0]), false);
+    let ys = if base_dims >= 2 {
+        unique_sorted(base_points.iter().map(|p| p[1]), true)
     } else {
         vec![0_i32]
     };
 
-    // Bounding-box guard (in display-cell units)
     if xs.len() > MAX_DISPLAY_COLS || ys.len() > MAX_DISPLAY_ROWS {
         return None;
     }
 
-    // Lookup set: (x, y) → base point present
     let point_set: HashSet<(i32, i32)> = if base_dims >= 2 {
         base_points.iter().map(|p| (p[0], p[1])).collect()
     } else {
-        xs.iter().map(|&x| (x, 0_i32)).collect()
+        xs.iter().map(|&x| (x, 0)).collect()
     };
 
-    let grid_rows = ys.len();
     let mut rows: Vec<String> = ys.iter().map(|&y| render_row(&xs, &point_set, y)).collect();
-
     if n_free > 0 {
-        attach_free_points(&mut rows, n_free, grid_rows);
+        attach_free_points(&mut rows, n_free);
     }
-
     Some(rows.join("\n"))
 }
 
-/// Render one horizontal grid row, emitting `●` for occupied cells and ` `
-/// for empty cells, separated by single spaces.
+fn unique_sorted(values: impl Iterator<Item = i32>, descending: bool) -> Vec<i32> {
+    let mut v: Vec<i32> = values.collect();
+    if descending {
+        v.sort_unstable_by(|a, b| b.cmp(a));
+    } else {
+        v.sort_unstable();
+    }
+    v.dedup();
+    v
+}
+
 fn render_row(xs: &[i32], point_set: &HashSet<(i32, i32)>, y: i32) -> String {
-    // capacity: one char per cell + one space separator between cells
     let mut row = String::with_capacity(xs.len() * 2);
     for (i, &x) in xs.iter().enumerate() {
         if i > 0 {
@@ -147,34 +123,28 @@ fn render_row(xs: &[i32], point_set: &HashSet<(i32, i32)>, y: i32) -> String {
 
 /// Append a `★` block to the right of the grid rows.
 ///
-/// - If `n_free ≤ grid_rows`: one star per row, centered vertically.
-/// - If `n_free > grid_rows`: stars fill column by column (top to bottom),
-///   wrapping into additional columns to the right.
-fn attach_free_points(rows: &mut [String], n_free: usize, grid_rows: usize) {
+/// `n_free <= rows.len()`: one star per row, centred vertically. Otherwise
+/// stars fill column by column (top-to-bottom), wrapping into additional
+/// columns on the right.
+fn attach_free_points(rows: &mut [String], n_free: usize) {
+    let grid_rows = rows.len();
     if n_free <= grid_rows {
         let top_pad = (grid_rows - n_free) / 2;
         for row in rows.iter_mut().skip(top_pad).take(n_free) {
             row.push_str(MARGIN);
             row.push('★');
         }
-    } else {
-        let num_star_cols = n_free.div_ceil(grid_rows);
-        for (r, row) in rows.iter_mut().enumerate().take(grid_rows) {
-            let mut first_star = true;
-            for c in 0..num_star_cols {
-                // Column-major indexing: column c holds stars c*grid_rows .. (c+1)*grid_rows
-                let star_idx = c * grid_rows + r;
-                if star_idx >= n_free {
-                    break;
-                }
-                if first_star {
-                    row.push_str(MARGIN);
-                    first_star = false;
-                } else {
-                    row.push(' ');
-                }
-                row.push('★');
+        return;
+    }
+    let num_star_cols = n_free.div_ceil(grid_rows);
+    for (r, row) in rows.iter_mut().enumerate() {
+        for c in 0..num_star_cols {
+            let star_idx = c * grid_rows + r;
+            if star_idx >= n_free {
+                break;
             }
+            row.push_str(if c == 0 { MARGIN } else { " " });
+            row.push('★');
         }
     }
 }
