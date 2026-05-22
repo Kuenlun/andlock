@@ -2,22 +2,19 @@
 // andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+use std::fmt::Write as _;
 use std::fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 use clap::{Args, Parser, Subcommand};
-
-use std::fmt::Write as _;
 
 use andlock::canonicalizer::canonicalize;
 use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
 
 use crate::pipeline::{RunOptions, run_pipeline};
 use crate::preview::render_preview;
-
-// Examples shown only with `--help` (kept out of `-h` so the brief view stays scannable).
 
 const TOP_EXAMPLES: &str = "\
 Examples:
@@ -91,34 +88,14 @@ enum Command {
         #[arg(short = 'f', long, default_value_t = 0, value_name = "N")]
         free_points: usize,
 
-        /// Print the grid as JSON instead of counting.
-        ///
-        /// Generated grids are emitted in canonical form. Redirect with
-        /// `> grid.json` to save.
-        #[arg(long, help_heading = "Output")]
-        export_json: bool,
-
         #[command(flatten)]
         range: RangeArgs,
 
         #[command(flatten)]
         memory: MemoryArgs,
 
-        /// Suppress progress, timing, and the grid preview.
-        ///
-        /// Pattern counts are still printed to stdout.
-        #[arg(short, long, help_heading = "Output")]
-        quiet: bool,
-
-        /// Group long counts with `_` separators (e.g. `140_704`).
-        ///
-        /// Off by default so the output stays pipe-safe and trivially
-        /// machine-parseable. Uses Rust-style underscores rather than
-        /// locale-dependent commas or spaces, so values can be pasted
-        /// straight into Rust source or any tool that accepts digit
-        /// grouping.
-        #[arg(long, help_heading = "Output")]
-        human: bool,
+        #[command(flatten)]
+        output: OutputArgs,
     },
     /// Count patterns on a grid loaded from JSON.
     ///
@@ -130,16 +107,10 @@ enum Command {
         /// Path to a JSON `GridDefinition`, or `-` to read from stdin.
         path: PathBuf,
 
-        /// Print the loaded grid as JSON instead of counting.
-        ///
-        /// Re-emits the grid pretty-printed; combine with --simplify to
-        /// canonicalize first.
-        #[arg(long, help_heading = "Output")]
-        export_json: bool,
-
         /// Canonicalize the grid before exporting (requires --export-json).
         ///
-        /// Translates the grid to the origin and compresses unused axes.
+        /// Anchors the centroid at the origin and divides each axis by its
+        /// coordinate GCD.
         #[arg(long, requires = "export_json", help_heading = "Output")]
         simplify: bool,
 
@@ -149,25 +120,37 @@ enum Command {
         #[command(flatten)]
         memory: MemoryArgs,
 
-        /// Suppress progress, timing, and the grid preview.
-        ///
-        /// Pattern counts are still printed to stdout.
-        #[arg(short, long, help_heading = "Output")]
-        quiet: bool,
-
-        /// Group long counts with `_` separators (e.g. `140_704`).
-        ///
-        /// Off by default so the output stays pipe-safe and trivially
-        /// machine-parseable. Uses Rust-style underscores rather than
-        /// locale-dependent commas or spaces, so values can be pasted
-        /// straight into Rust source or any tool that accepts digit
-        /// grouping.
-        #[arg(long, help_heading = "Output")]
-        human: bool,
+        #[command(flatten)]
+        output: OutputArgs,
     },
 }
 
-#[derive(Args)]
+#[derive(Args, Copy, Clone)]
+struct OutputArgs {
+    /// Print the grid as JSON instead of counting.
+    ///
+    /// `grid` emits canonical form; `file` re-emits the loaded grid
+    /// (combine with --simplify to canonicalize). Redirect with
+    /// `> grid.json` to save.
+    #[arg(long, help_heading = "Output")]
+    export_json: bool,
+
+    /// Suppress progress, timing, and the grid preview.
+    ///
+    /// Pattern counts are still printed to stdout.
+    #[arg(short, long, help_heading = "Output")]
+    quiet: bool,
+
+    /// Group long counts with `_` separators (e.g. `140_704`).
+    ///
+    /// Off by default so the output stays pipe-safe. Uses Rust-style
+    /// underscores rather than locale-dependent commas or spaces, so values
+    /// can be pasted straight into Rust source.
+    #[arg(long, help_heading = "Output")]
+    human: bool,
+}
+
+#[derive(Args, Copy, Clone)]
 struct MemoryArgs {
     /// Cap peak RAM allocation (e.g. 512M, 2GiB).
     ///
@@ -189,7 +172,7 @@ struct MemoryArgs {
     memory_limit: Option<u64>,
 }
 
-#[derive(Args)]
+#[derive(Args, Copy, Clone)]
 struct RangeArgs {
     /// Skip patterns shorter than N points.
     ///
@@ -206,9 +189,6 @@ struct RangeArgs {
     max_length: Option<usize>,
 }
 
-/// Parses `--memory-limit` values like "1024", "512M", "2GiB". Suffixes use
-/// binary units (KiB / MiB / …) and are case-insensitive; a bare number is
-/// interpreted as raw bytes.
 fn parse_memory_size(s: &str) -> Result<u64, parse_size::Error> {
     parse_size::Config::new().with_binary().parse_size(s)
 }
@@ -229,110 +209,84 @@ fn resolve_range(range: &RangeArgs, n: usize) -> Result<(usize, usize)> {
     Ok((min, max))
 }
 
-const fn io_kind_str(kind: io::ErrorKind) -> &'static str {
-    match kind {
-        io::ErrorKind::NotFound => "not found",
-        io::ErrorKind::PermissionDenied => "permission denied",
-        io::ErrorKind::AlreadyExists => "already exists",
-        io::ErrorKind::WouldBlock => "operation would block",
-        io::ErrorKind::InvalidInput => "invalid input",
-        io::ErrorKind::TimedOut => "timed out",
-        io::ErrorKind::WriteZero => "write zero",
-        io::ErrorKind::Interrupted => "interrupted",
-        io::ErrorKind::ConnectionRefused => "connection refused",
-        io::ErrorKind::ConnectionReset => "connection reset",
-        io::ErrorKind::ConnectionAborted => "connection aborted",
-        _ => "I/O error",
-    }
-}
-
-/// Parses the command line and dispatches to the matching subcommand.
-///
 /// # Errors
 /// Propagates parse, I/O, and validation errors to the caller.
 pub fn run() -> Result<()> {
-    let cli = Cli::parse();
-
-    match cli.command {
+    match Cli::parse().command {
         Command::Grid {
             dims,
             free_points,
-            export_json,
             range,
             memory,
-            quiet,
-            human,
+            output,
         } => {
             let parsed = parse_dims(&dims).map_err(|e| anyhow!("{e}"))?;
             let grid = build_grid_definition(&parsed, free_points);
-
-            if export_json {
-                warn_ignored_range(&range, quiet);
-                println!("{}", grid_to_json(&grid));
-                return Ok(());
-            }
-
-            grid.validate().map_err(|e| anyhow!("{e}"))?;
-            let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
-            if !quiet && let Some(preview) = render_preview(&grid, Some(free_points)) {
-                println!("{preview}");
-                println!();
-            }
-            run_pipeline(
-                &grid,
-                RunOptions {
-                    min_length,
-                    max_length,
-                    memory_limit: memory.memory_limit,
-                    quiet,
-                    human,
-                },
-            )?;
+            run_grid(&grid, Some(free_points), range, memory, output)
         }
         Command::File {
             path,
-            export_json,
             simplify,
             range,
             memory,
-            quiet,
-            human,
+            output,
         } => {
             let (content, src_label) = read_grid_source(&path)?;
             let grid: GridDefinition = serde_json::from_str(&content)
                 .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?;
-
-            if export_json {
-                warn_ignored_range(&range, quiet);
-                let out = if simplify { canonicalize(&grid) } else { grid };
-                println!("{}", grid_to_json(&out));
-                return Ok(());
-            }
-
-            grid.validate().map_err(|e| anyhow!("{e}"))?;
-            let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
-            if !quiet && let Some(preview) = render_preview(&grid, None) {
-                println!("{preview}");
-                println!();
-            }
-            run_pipeline(
-                &grid,
-                RunOptions {
-                    min_length,
-                    max_length,
-                    memory_limit: memory.memory_limit,
-                    quiet,
-                    human,
-                },
-            )?;
+            let grid = if output.export_json && simplify {
+                canonicalize(&grid)
+            } else {
+                grid
+            };
+            run_grid(&grid, None, range, memory, output)
         }
     }
-
-    Ok(())
 }
 
-/// Serializes a [`GridDefinition`] as JSON with each coordinate vector
-/// inlined on a single line, matching the layout consumed by `andlock file`.
+/// `known_free_dims` is `Some` only for grids freshly built by `grid`, so the
+/// preview can place free-point stars without re-detecting them.
+fn run_grid(
+    grid: &GridDefinition,
+    known_free_dims: Option<usize>,
+    range: RangeArgs,
+    memory: MemoryArgs,
+    output: OutputArgs,
+) -> Result<()> {
+    let OutputArgs {
+        export_json,
+        quiet,
+        human,
+    } = output;
+
+    if export_json {
+        if !quiet && (range.min_length.is_some() || range.max_length.is_some()) {
+            eprintln!("warning: --min-length and --max-length have no effect with --export-json");
+        }
+        println!("{}", grid_to_json(grid));
+        return Ok(());
+    }
+
+    grid.validate().map_err(|e| anyhow!("{e}"))?;
+    let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
+    if !quiet && let Some(preview) = render_preview(grid, known_free_dims) {
+        println!("{preview}");
+        println!();
+    }
+    run_pipeline(
+        grid,
+        RunOptions {
+            min_length,
+            max_length,
+            memory_limit: memory.memory_limit,
+            quiet,
+            human,
+        },
+    )
+}
+
+/// Inline JSON layout: one coordinate vector per line, matching the format
+/// `andlock file` consumes.
 fn grid_to_json(grid: &GridDefinition) -> String {
     let mut s = String::new();
     let _ = write!(
@@ -357,31 +311,16 @@ fn grid_to_json(grid: &GridDefinition) -> String {
     s
 }
 
-/// Reads the grid source: stdin when `path == "-"`, otherwise the file
-/// at `path`. Returns the raw text and a human-readable label suitable
-/// for embedding in error messages.
-fn read_grid_source(path: &std::path::Path) -> Result<(String, String)> {
-    let stdin_sentinel = std::path::Path::new("-");
-    if path == stdin_sentinel {
+/// Returns the file contents and a label suitable for error messages
+/// (`stdin` for `-`, or a quoted path).
+fn read_grid_source(path: &Path) -> Result<(String, String)> {
+    if path == Path::new("-") {
         let text = io::read_to_string(io::stdin())
-            .map_err(|e| anyhow!("could not read from stdin: {}", io_kind_str(e.kind())))?;
+            .map_err(|e| anyhow!("could not read from stdin: {e}"))?;
         Ok((text, "stdin".to_owned()))
     } else {
-        let text = fs::read_to_string(path).map_err(|e| {
-            anyhow!(
-                "could not open file \"{}\": {}",
-                path.display(),
-                io_kind_str(e.kind())
-            )
-        })?;
+        let text = fs::read_to_string(path)
+            .map_err(|e| anyhow!("could not open file \"{}\": {e}", path.display()))?;
         Ok((text, format!("\"{}\"", path.display())))
-    }
-}
-
-/// Emits the standard warning when `--export-json` is paired with a
-/// length flag that the export path ignores. Suppressed in `--quiet`.
-fn warn_ignored_range(range: &RangeArgs, quiet: bool) {
-    if !quiet && (range.min_length.is_some() || range.max_length.is_some()) {
-        eprintln!("warning: --min-length and --max-length have no effect with --export-json");
     }
 }
