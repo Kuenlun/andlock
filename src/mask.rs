@@ -98,113 +98,49 @@ pub trait Mask:
     fn gosper_next(self) -> Self;
 }
 
-impl Mask for u32 {
-    const ZERO: Self = 0;
-    const MAX_POINTS: usize = 31;
+macro_rules! impl_mask {
+    ($t:ty, $max:expr) => {
+        impl Mask for $t {
+            const ZERO: Self = 0;
+            const MAX_POINTS: usize = $max;
 
-    #[inline]
-    fn bit(i: usize) -> Self {
-        1u32 << i
-    }
-    #[inline]
-    fn low_bits(n: usize) -> Self {
-        (1u32 << n) - 1
-    }
-    #[inline]
-    fn count_ones(self) -> u32 {
-        Self::count_ones(self)
-    }
-    #[inline]
-    fn trailing_zeros(self) -> u32 {
-        Self::trailing_zeros(self)
-    }
-    #[inline]
-    fn wrapping_neg(self) -> Self {
-        Self::wrapping_neg(self)
-    }
-    #[inline]
-    fn wrapping_sub_one(self) -> Self {
-        self.wrapping_sub(1)
-    }
-    #[inline]
-    fn gosper_next(self) -> Self {
-        let c = self & self.wrapping_neg();
-        let r = self.wrapping_add(c);
-        (((r ^ self) >> 2) / c) | r
-    }
+            #[inline]
+            fn bit(i: usize) -> Self {
+                1 << i
+            }
+            #[inline]
+            fn low_bits(n: usize) -> Self {
+                (1 << n) - 1
+            }
+            #[inline]
+            fn count_ones(self) -> u32 {
+                Self::count_ones(self)
+            }
+            #[inline]
+            fn trailing_zeros(self) -> u32 {
+                Self::trailing_zeros(self)
+            }
+            #[inline]
+            fn wrapping_neg(self) -> Self {
+                Self::wrapping_neg(self)
+            }
+            #[inline]
+            fn wrapping_sub_one(self) -> Self {
+                self.wrapping_sub(1)
+            }
+            #[inline]
+            fn gosper_next(self) -> Self {
+                let c = self & self.wrapping_neg();
+                let r = self.wrapping_add(c);
+                (((r ^ self) >> 2) / c) | r
+            }
+        }
+    };
 }
 
-impl Mask for u64 {
-    const ZERO: Self = 0;
-    const MAX_POINTS: usize = 63;
-
-    #[inline]
-    fn bit(i: usize) -> Self {
-        1u64 << i
-    }
-    #[inline]
-    fn low_bits(n: usize) -> Self {
-        (1u64 << n) - 1
-    }
-    #[inline]
-    fn count_ones(self) -> u32 {
-        Self::count_ones(self)
-    }
-    #[inline]
-    fn trailing_zeros(self) -> u32 {
-        Self::trailing_zeros(self)
-    }
-    #[inline]
-    fn wrapping_neg(self) -> Self {
-        Self::wrapping_neg(self)
-    }
-    #[inline]
-    fn wrapping_sub_one(self) -> Self {
-        self.wrapping_sub(1)
-    }
-    #[inline]
-    fn gosper_next(self) -> Self {
-        let c = self & self.wrapping_neg();
-        let r = self.wrapping_add(c);
-        (((r ^ self) >> 2) / c) | r
-    }
-}
-
-impl Mask for u128 {
-    const ZERO: Self = 0;
-    const MAX_POINTS: usize = 127;
-
-    #[inline]
-    fn bit(i: usize) -> Self {
-        1u128 << i
-    }
-    #[inline]
-    fn low_bits(n: usize) -> Self {
-        (1u128 << n) - 1
-    }
-    #[inline]
-    fn count_ones(self) -> u32 {
-        Self::count_ones(self)
-    }
-    #[inline]
-    fn trailing_zeros(self) -> u32 {
-        Self::trailing_zeros(self)
-    }
-    #[inline]
-    fn wrapping_neg(self) -> Self {
-        Self::wrapping_neg(self)
-    }
-    #[inline]
-    fn wrapping_sub_one(self) -> Self {
-        self.wrapping_sub(1)
-    }
-    #[inline]
-    fn gosper_next(self) -> Self {
-        let c = self & self.wrapping_neg();
-        let r = self.wrapping_add(c);
-        (((r ^ self) >> 2) / c) | r
-    }
-}
+impl_mask!(u32, 31);
+impl_mask!(u64, 63);
+impl_mask!(u128, 127);
 
 /// Hard upper bound across every shipped [`Mask`] impl.
 ///
