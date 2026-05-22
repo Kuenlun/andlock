@@ -9,7 +9,6 @@
 #![cfg_attr(coverage_nightly, feature(coverage_attribute))]
 
 mod cli;
-mod json_format;
 mod memory;
 mod output;
 mod pipeline;

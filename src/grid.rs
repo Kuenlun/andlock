@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 use crate::mask::Mask;
 
@@ -16,7 +16,7 @@ use crate::mask::Mask;
 pub use crate::mask::MAX_POINTS;
 
 /// Finite set of integer-coordinate nodes in `dimensions`-dimensional space.
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct GridDefinition {
     pub dimensions: usize,
     pub points: Vec<Vec<i32>>,
