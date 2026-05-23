@@ -135,8 +135,8 @@ pub struct RenderedReport {
 }
 
 /// Lay out the table and summary block with every value right-aligned to a
-/// shared column edge. `total_str = None` skips the `Total` row, used when a
-/// memory clamp truncated the run.
+/// shared column edge. `total_str = None` skips the `Total` row, used when the
+/// total cannot be represented (sum overflowed `u128`).
 pub fn render_final(
     entries: &[(usize, u128)],
     human: bool,
