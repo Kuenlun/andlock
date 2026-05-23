@@ -208,7 +208,7 @@ pub fn run() -> Result<()> {
         clap_complete::generate(shell, &mut cmd, name, &mut io::stdout());
         return Ok(());
     }
-    let (grid, known_free_dims) = match (cli.dims.as_deref(), cli.file.as_deref()) {
+    let (mut grid, known_free_dims) = match (cli.dims.as_deref(), cli.file.as_deref()) {
         (Some(dims), None) => {
             let parsed = parse_dims(dims).map_err(|e| anyhow!("{e}"))?;
             let grid = build_grid_definition(&parsed, cli.free_points);
@@ -216,15 +216,16 @@ pub fn run() -> Result<()> {
         }
         (None, Some(path)) => {
             let (content, src_label) = read_grid_source(path)?;
-            let mut grid: GridDefinition = serde_json::from_str(&content)
+            let grid: GridDefinition = serde_json::from_str(&content)
                 .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?;
-            if cli.output.export_json && cli.simplify {
-                grid = canonicalize(&grid);
-            }
             (grid, None)
         }
         _ => unreachable!("clap enforces exactly one of <DIMS> or --file"),
     };
+    grid.validate().map_err(|e| anyhow!("{e}"))?;
+    if cli.simplify {
+        grid = canonicalize(&grid);
+    }
     run_grid(&grid, known_free_dims, cli.range, cli.memory, cli.output)
 }
 
@@ -251,7 +252,6 @@ fn run_grid(
         return Ok(());
     }
 
-    grid.validate().map_err(|e| anyhow!("{e}"))?;
     let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
     if !quiet && let Some(preview) = render_preview(grid, known_free_dims) {
         println!("{preview}");
