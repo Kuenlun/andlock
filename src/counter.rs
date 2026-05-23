@@ -2,6 +2,8 @@
 // andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+use std::ops::ControlFlow;
+
 use crate::mask::{self, Mask};
 
 /// Progress event emitted by [`count_patterns_dp`].
@@ -62,13 +64,6 @@ pub fn effective_max_length(n: usize, requested: usize, budget_bytes: u64) -> us
     0
 }
 
-fn zeroed_buffer(len: usize) -> Result<Vec<u128>, std::collections::TryReserveError> {
-    let mut buf: Vec<u128> = Vec::new();
-    buf.try_reserve_exact(len)?;
-    buf.resize(len, 0);
-    Ok(buf)
-}
-
 /// Working set [`count_patterns_dp`] needs to run. Allocation failure is
 /// hoisted into [`DpScratch::allocate`] so the DP body itself is infallible.
 pub struct DpScratch {
@@ -94,7 +89,11 @@ impl DpScratch {
         } else {
             dp_layer_capacity(n, max_length)
         };
-        zeroed_buffer(half.saturating_mul(2)).map(|buf| Self { buf, half })
+        let len = half.saturating_mul(2);
+        let mut buf: Vec<u128> = Vec::new();
+        buf.try_reserve_exact(len)?;
+        buf.resize(len, 0);
+        Ok(Self { buf, half })
     }
 
     fn split_mut(&mut self) -> (&mut [u128], &mut [u128]) {
@@ -163,6 +162,11 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 /// Returns `counts[k] = patterns of length k` for `k in 0..=max_length`;
 /// `counts[0] = 1` is the empty pattern.
 ///
+/// `on_event` may return [`ControlFlow::Break`] to abort the run; the partial
+/// `counts` are returned with zeros past the last finalised length, so
+/// callers can still display the rows already emitted via
+/// [`DpEvent::LengthDone`].
+///
 /// Two popcount layers are alive at any time (source `p`, destination
 /// `p + 1`), carved out of `scratch` and ping-ponged in place. Each mask of
 /// popcount `p` packs `p` `u128` slots, one per valid endpoint; layer-local
@@ -176,7 +180,7 @@ fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
 /// `n > M::MAX_POINTS`, `blocks.len() != n * n`, `max_length > n`, or
 /// `scratch` sized for a different `(n, max_length)` than requested.
 #[allow(clippy::too_many_lines)]
-pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent)>(
+pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     scratch: &mut DpScratch,
     n: usize,
     blocks: &[M],
@@ -197,29 +201,41 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent)>(
     if blocks.iter().all(|&b| b == M::ZERO) {
         let counts = count_unconstrained(n, max_length);
         for (k, &c) in counts.iter().enumerate() {
-            on_event(DpEvent::LengthDone {
+            if on_event(DpEvent::LengthDone {
                 length: k,
                 count: c,
-            });
+            })
+            .is_break()
+            {
+                return counts;
+            }
         }
         return counts;
     }
 
     let mut counts = vec![0u128; max_length + 1];
     counts[0] = 1;
-    on_event(DpEvent::LengthDone {
+    if on_event(DpEvent::LengthDone {
         length: 0,
         count: 1,
-    });
+    })
+    .is_break()
+    {
+        return counts;
+    }
     if max_length == 0 {
         return counts;
     }
 
     counts[1] = n as u128;
-    on_event(DpEvent::LengthDone {
+    if on_event(DpEvent::LengthDone {
         length: 1,
         count: counts[1],
-    });
+    })
+    .is_break()
+    {
+        return counts;
+    }
     if max_length < 2 {
         return counts;
     }
@@ -234,9 +250,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent)>(
     let full_mask: M = M::low_bits(n);
 
     // Popcount-1 layer: each of the n masks has exactly one endpoint, one way.
-    for slot in &mut dp_curr[..n] {
-        *slot = 1;
-    }
+    dp_curr[..n].fill(1);
 
     let mut prefix_sum = [0usize; SLOTS];
     let mut suffix_sum = [0usize; SLOTS];
@@ -247,7 +261,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent)>(
     // Ascend through popcount classes so every subset is final before it is
     // read. Stops at max_length-1, the last layer that contributes to
     // counts[max_length].
-    for p in 1..max_length {
+    'outer: for p in 1..max_length {
         let next_p = p + 1;
         // At p == max_length-1 we still accumulate counts[max_length] but
         // skip dp_next writes; nothing would ever read them.
@@ -260,16 +274,16 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent)>(
         };
 
         if need_dp_next {
-            for slot in &mut dp_next[..next_len] {
-                *slot = 0;
-            }
+            dp_next[..next_len].fill(0);
         }
 
         let mut idx_curr: usize = 0;
         let mut mask: M = M::low_bits(p);
         let last: M = M::low_bits(p) << (n - p);
         loop {
-            on_event(DpEvent::Mask);
+            if on_event(DpEvent::Mask).is_break() {
+                break 'outer;
+            }
             let base_curr = idx_curr * p;
 
             if need_dp_next {
@@ -341,10 +355,14 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent)>(
 
         // counts[next_p] only takes contributions from popcount-p masks, so
         // it is final once the layer is done.
-        on_event(DpEvent::LengthDone {
+        if on_event(DpEvent::LengthDone {
             length: next_p,
             count: counts[next_p],
-        });
+        })
+        .is_break()
+        {
+            break 'outer;
+        }
         std::mem::swap(&mut dp_curr, &mut dp_next);
     }
 
