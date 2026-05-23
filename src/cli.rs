@@ -7,7 +7,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
-use clap::{Args, Parser};
+use clap::{Args, CommandFactory, Parser};
+use clap_complete::Shell;
 
 use andlock::canonicalizer::canonicalize;
 use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
@@ -61,7 +62,7 @@ struct Cli {
     /// Required unless --file is given.
     #[arg(
         value_name = "DIMS",
-        required_unless_present = "file",
+        required_unless_present_any = ["file", "completions"],
         conflicts_with = "file"
     )]
     dims: Option<String>,
@@ -69,6 +70,13 @@ struct Cli {
     /// Load a JSON `GridDefinition` from <PATH>, or `-` to read stdin.
     #[arg(long, value_name = "PATH")]
     file: Option<PathBuf>,
+
+    /// Print a shell completion script for <SHELL> to stdout.
+    ///
+    /// Source the output to enable tab completion. Supported values:
+    /// bash, elvish, fish, powershell, zsh.
+    #[arg(long, value_name = "SHELL", exclusive = true)]
+    completions: Option<Shell>,
 
     /// Add N isolated points not collinear with any grid pair.
     ///
@@ -194,6 +202,12 @@ fn resolve_range(range: &RangeArgs, n: usize) -> Result<(usize, usize)> {
 /// Propagates parse, I/O, and validation errors to the caller.
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(shell) = cli.completions {
+        let mut cmd = Cli::command();
+        let name = cmd.get_name().to_owned();
+        clap_complete::generate(shell, &mut cmd, name, &mut io::stdout());
+        return Ok(());
+    }
     let (grid, known_free_dims) = match (cli.dims.as_deref(), cli.file.as_deref()) {
         (Some(dims), None) => {
             let parsed = parse_dims(dims).map_err(|e| anyhow!("{e}"))?;
