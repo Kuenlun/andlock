@@ -12,6 +12,9 @@ pub enum DpEvent {
     Mask,
     /// `counts[length]` has received its last contribution and is now final.
     LengthDone { length: usize, count: u128 },
+    /// Counts past the last [`DpEvent::LengthDone`] do not fit in `u128`;
+    /// the run stops here so no inexact value is ever emitted.
+    Overflow,
 }
 
 /// Exact `C(n, k)` in `u128`, saturating to `u128::MAX` on overflow.
@@ -143,14 +146,20 @@ static BINOM: [[usize; SLOTS]; SLOTS] = {
 };
 
 /// Closed-form counts when every move is legal: the falling factorial
-/// `P(n, k) = n * (n-1) * ... * (n-k+1)`.
+/// `P(n, k) = n * (n-1) * ... * (n-k+1)`. Truncates the returned vector at
+/// the first `k` whose `P(n, k)` overflows `u128`, so callers can detect
+/// the saturation via `counts.len() <= max_length`.
 fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
     let mut counts = vec![0u128; max_length + 1];
     counts[0] = 1;
     let mut perm: u128 = 1;
-    for (k, slot) in counts.iter_mut().enumerate().skip(1) {
-        perm *= (n - k + 1) as u128;
-        *slot = perm;
+    for k in 1..=max_length {
+        let Some(next) = perm.checked_mul((n - k + 1) as u128) else {
+            counts.truncate(k);
+            return counts;
+        };
+        perm = next;
+        counts[k] = perm;
     }
     counts
 }
@@ -200,6 +209,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
 
     if blocks.iter().all(|&b| b == M::ZERO) {
         let counts = count_unconstrained(n, max_length);
+        let truncated = counts.len() <= max_length;
         for (k, &c) in counts.iter().enumerate() {
             if on_event(DpEvent::LengthDone {
                 length: k,
@@ -209,6 +219,9 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
             {
                 return counts;
             }
+        }
+        if truncated {
+            let _ = on_event(DpEvent::Overflow);
         }
         return counts;
     }
@@ -257,6 +270,8 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     let mut bit_pos = [0u32; SLOTS];
     // (next, dst_idx) per free bit; reused across masks.
     let mut free_meta = [(0usize, 0usize); SLOTS];
+
+    let mut overflow = false;
 
     // Ascend through popcount classes so every subset is final before it is
     // read. Stops at max_length-1, the last layer that contributes to
@@ -339,7 +354,13 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
                 for &(next, dst_idx) in free_slice {
                     let blockers = blocks[row_start + next];
                     if mask & blockers == blockers {
-                        counts[next_p] += ways;
+                        let Some(new_count) = counts[next_p].checked_add(ways) else {
+                            overflow = true;
+                            break 'outer;
+                        };
+                        counts[next_p] = new_count;
+                        // Safe: dp_next[dst_idx] <= counts[next_p] by construction,
+                        // so if the checked add above succeeded so does this one.
                         if need_dp_next {
                             dp_next[dst_idx] += ways;
                         }
@@ -364,6 +385,10 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
             break 'outer;
         }
         std::mem::swap(&mut dp_curr, &mut dp_next);
+    }
+
+    if overflow {
+        let _ = on_event(DpEvent::Overflow);
     }
 
     counts

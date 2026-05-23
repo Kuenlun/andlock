@@ -69,6 +69,9 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
     print_report(&outcome, n, opts);
     if !opts.quiet {
         print_footer(&outcome);
+        if outcome.total.is_none() && !outcome.entries.is_empty() {
+            print_total_overflow_warning();
+        }
     }
     Ok(())
 }
@@ -79,6 +82,11 @@ struct DpRunOutcome {
     clamp: Option<(u64, u64)>,
     elapsed: Duration,
     cancelled: bool,
+    /// Highest length that was counted exactly before the DP overflowed `u128`;
+    /// `None` when no overflow happened.
+    overflow_after: Option<usize>,
+    /// Sum across every finalised length; `None` when the sum itself overflowed.
+    total: Option<u128>,
 }
 
 fn run_dp_sequence<M: Mask>(
@@ -115,7 +123,7 @@ fn run_dp_sequence<M: Mask>(
     let mut printer = LengthPrinter::new(mp, min_length, effective, human, count_pb.as_ref());
 
     let t1 = Instant::now();
-    drive_dp::<M>(n, &blocks, effective, count_pb.as_ref(), &mut printer)?;
+    let overflow_after = drive_dp::<M>(n, &blocks, effective, count_pb.as_ref(), &mut printer)?;
     let elapsed = t1.elapsed();
     let cancelled = tty::is_cancelled();
 
@@ -126,12 +134,22 @@ fn run_dp_sequence<M: Mask>(
     let entries = printer.finish();
     drop(count_pb);
 
+    if !quiet && let Some(last) = overflow_after {
+        print_overflow_warning(last);
+    }
+
+    let total = entries
+        .iter()
+        .try_fold(0u128, |acc, &(_, c)| acc.checked_add(c));
+
     Ok(DpRunOutcome {
         entries,
         effective,
         clamp,
         elapsed,
         cancelled,
+        overflow_after,
+        total,
     })
 }
 
@@ -143,6 +161,18 @@ fn print_clamp_warning(effective: usize, needed: u64, budget: u64) {
         HumanBytes(needed),
         HumanBytes(budget),
     );
+}
+
+fn print_overflow_warning(last_exact: usize) {
+    let warn = style("warning:").yellow().bold();
+    eprintln!(
+        "{warn} counts past length {last_exact} do not fit in u128, run limited to --max-length {last_exact}",
+    );
+}
+
+fn print_total_overflow_warning() {
+    let warn = style("warning:").yellow().bold();
+    eprintln!("{warn} sum across all lengths overflows, omitted from the summary");
 }
 
 fn build_block_spinner(
@@ -190,13 +220,15 @@ fn dp_progress_message(current: usize, effective: usize, n: usize, mem_bytes: u6
 
 /// Each `LengthDone` advances the displayed length in lockstep with the DP.
 /// Returns [`ControlFlow::Break`] on SIGINT so the DP yields its partial state.
+/// Result is `Some(last_exact_length)` when the DP stopped because the next
+/// count would not fit in `u128`, `None` otherwise.
 fn drive_dp<M: Mask>(
     n: usize,
     blocks: &[M],
     effective: usize,
     count_pb: Option<&ProgressBar>,
     printer: &mut LengthPrinter<'_>,
-) -> Result<Vec<u128>> {
+) -> Result<Option<usize>> {
     let mem_est = dp_table_bytes(n, effective);
     let mut scratch = DpScratch::allocate::<M>(n, blocks, effective).map_err(|e| {
         anyhow!(
@@ -205,33 +237,37 @@ fn drive_dp<M: Mask>(
             HumanBytes(mem_est)
         )
     })?;
-    Ok(count_patterns_dp(
-        &mut scratch,
-        n,
-        blocks,
-        effective,
-        |event| {
-            match event {
-                DpEvent::Mask => {
-                    if let Some(pb) = count_pb {
-                        pb.inc(1);
-                    }
-                }
-                DpEvent::LengthDone { length, count } => {
-                    printer.print(length, count);
-                    if let Some(pb) = count_pb {
-                        let next = (length + 1).min(effective);
-                        pb.set_message(dp_progress_message(next, effective, n, mem_est));
-                    }
+
+    let mut last_emitted: Option<usize> = None;
+    let mut overflow = false;
+
+    let _ = count_patterns_dp(&mut scratch, n, blocks, effective, |event| {
+        match event {
+            DpEvent::Mask => {
+                if let Some(pb) = count_pb {
+                    pb.inc(1);
                 }
             }
-            if tty::is_cancelled() {
-                ControlFlow::Break(())
-            } else {
-                ControlFlow::Continue(())
+            DpEvent::LengthDone { length, count } => {
+                last_emitted = Some(length);
+                printer.print(length, count);
+                if let Some(pb) = count_pb {
+                    let next = (length + 1).min(effective);
+                    pb.set_message(dp_progress_message(next, effective, n, mem_est));
+                }
             }
-        },
-    ))
+            DpEvent::Overflow => {
+                overflow = true;
+            }
+        }
+        if tty::is_cancelled() {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
+    });
+
+    Ok(overflow.then(|| last_emitted.unwrap_or(0)))
 }
 
 /// Renders the per-length table, the separator, and the `Total`/`Points`
@@ -239,8 +275,10 @@ fn drive_dp<M: Mask>(
 /// runs still show the partial total of what was counted; an empty table
 /// omits the separator.
 fn print_report(outcome: &DpRunOutcome, n: usize, opts: RunOptions) {
-    let total_str = (!outcome.entries.is_empty())
-        .then(|| format_count(outcome.entries.iter().map(|&(_, c)| c).sum(), opts.human));
+    let total_str = outcome
+        .total
+        .filter(|_| !outcome.entries.is_empty())
+        .map(|t| format_count(t, opts.human));
     let points_str = n.to_string();
     let RenderedReport {
         table,
@@ -271,6 +309,8 @@ fn print_footer(outcome: &DpRunOutcome) {
             Some(&(l, _)) => eprintln!("  Interrupted at length {l} after {elapsed:.2?}"),
             None => eprintln!("  Interrupted after {elapsed:.2?}"),
         }
+    } else if let Some(last) = outcome.overflow_after {
+        eprintln!("  Counted up to length {last} in {elapsed:.2?}");
     } else if outcome.clamp.is_some() {
         eprintln!(
             "  Counted up to length {} in {elapsed:.2?}",
