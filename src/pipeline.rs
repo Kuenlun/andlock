@@ -6,6 +6,7 @@
 //! prints the table + summary block. Dispatches the generic counter to its
 //! `u32` / `u64` / `u128` monomorphisation per run.
 
+use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, anyhow};
@@ -57,47 +58,34 @@ fn bar_style() -> ProgressStyle {
 pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
     let n = grid.points.len();
     let mp = tty::progress();
-    let block_pb = build_block_spinner(mp, n, grid.dimensions, opts.quiet);
 
     let outcome = match mask::smallest_for(n) {
-        Some(Width::U32) => run_dp_sequence::<u32>(grid, n, opts, mp, block_pb.as_ref()),
-        Some(Width::U64) => run_dp_sequence::<u64>(grid, n, opts, mp, block_pb.as_ref()),
-        Some(Width::U128) => run_dp_sequence::<u128>(grid, n, opts, mp, block_pb.as_ref()),
+        Some(Width::U32) => run_dp_sequence::<u32>(grid, n, opts, mp),
+        Some(Width::U64) => run_dp_sequence::<u64>(grid, n, opts, mp),
+        Some(Width::U128) => run_dp_sequence::<u128>(grid, n, opts, mp),
         None => panic!("n={n} past mask::MAX_POINTS, validate first"),
     }?;
 
-    print_report(
-        &outcome.entries,
-        &outcome.counts,
-        n,
-        opts.min_length,
-        opts.max_length,
-        outcome.effective,
-        opts.human,
-    );
+    print_report(&outcome, n, opts);
     if !opts.quiet {
-        print_footer(outcome.clamp.map(|_| outcome.effective), outcome.elapsed);
+        print_footer(&outcome);
     }
     Ok(())
 }
 
-/// Mask-erased outputs the finalisation phase reads.
 struct DpRunOutcome {
-    counts: Vec<u128>,
     entries: Vec<(usize, u128)>,
     effective: usize,
     clamp: Option<(u64, u64)>,
     elapsed: Duration,
+    cancelled: bool,
 }
 
-/// Width-specialised driver: builds the block matrix, applies the memory
-/// clamp, runs the DP, and collects everything finalisation needs.
 fn run_dp_sequence<M: Mask>(
     grid: &GridDefinition,
     n: usize,
     opts: RunOptions,
     mp: &MultiProgress,
-    block_pb: Option<&ProgressBar>,
 ) -> Result<DpRunOutcome> {
     let RunOptions {
         min_length,
@@ -107,6 +95,7 @@ fn run_dp_sequence<M: Mask>(
         human,
     } = opts;
 
+    let block_pb = build_block_spinner(mp, n, grid.dimensions, quiet);
     let blocks: Vec<M> = compute_blocks(grid);
     if let Some(pb) = block_pb {
         pb.finish_and_clear();
@@ -126,24 +115,26 @@ fn run_dp_sequence<M: Mask>(
     let mut printer = LengthPrinter::new(mp, min_length, effective, human, count_pb.as_ref());
 
     let t1 = Instant::now();
-    let counts = drive_dp::<M>(n, &blocks, effective, count_pb.as_ref(), &mut printer)?;
+    drive_dp::<M>(n, &blocks, effective, count_pb.as_ref(), &mut printer)?;
     let elapsed = t1.elapsed();
+    let cancelled = tty::is_cancelled();
 
-    let entries = printer.finish();
-    if let Some(pb) = count_pb {
+    if let Some(pb) = count_pb.as_ref() {
+        pb.disable_steady_tick();
         pb.finish_and_clear();
     }
+    let entries = printer.finish();
+    drop(count_pb);
 
     Ok(DpRunOutcome {
-        counts,
         entries,
         effective,
         clamp,
         elapsed,
+        cancelled,
     })
 }
 
-/// Up-front clamp warning, styled like rustc/cargo.
 fn print_clamp_warning(effective: usize, needed: u64, budget: u64) {
     let warn = style("warning:").yellow().bold();
     eprintln!(
@@ -185,7 +176,7 @@ fn build_dp_bar(
     let pb = mp.add(ProgressBar::new(dp_ticks));
     pb.set_style(bar_style());
     pb.set_prefix("Counting");
-    pb.set_message(dp_progress_message(effective.min(1), effective, n, mem_est));
+    pb.set_message(dp_progress_message(1, effective, n, mem_est));
     pb.enable_steady_tick(Duration::from_millis(80));
     Some(pb)
 }
@@ -197,8 +188,8 @@ fn dp_progress_message(current: usize, effective: usize, n: usize, mem_bytes: u6
     )
 }
 
-/// Allocates scratch and runs the counter, forwarding events to the bar and
-/// printer. Each `LengthDone` advances the displayed length in lockstep.
+/// Each `LengthDone` advances the displayed length in lockstep with the DP.
+/// Returns [`ControlFlow::Break`] on SIGINT so the DP yields its partial state.
 fn drive_dp<M: Mask>(
     n: usize,
     blocks: &[M],
@@ -219,57 +210,73 @@ fn drive_dp<M: Mask>(
         n,
         blocks,
         effective,
-        |event| match event {
-            DpEvent::Mask => {
-                if let Some(pb) = count_pb {
-                    pb.inc(1);
+        |event| {
+            match event {
+                DpEvent::Mask => {
+                    if let Some(pb) = count_pb {
+                        pb.inc(1);
+                    }
+                }
+                DpEvent::LengthDone { length, count } => {
+                    printer.print(length, count);
+                    if let Some(pb) = count_pb {
+                        let next = (length + 1).min(effective);
+                        pb.set_message(dp_progress_message(next, effective, n, mem_est));
+                    }
                 }
             }
-            DpEvent::LengthDone { length, count } => {
-                printer.print(length, count);
-                if let Some(pb) = count_pb {
-                    let next = (length + 1).min(effective);
-                    pb.set_message(dp_progress_message(next, effective, n, mem_est));
-                }
+            if tty::is_cancelled() {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
             }
         },
     ))
 }
 
-/// Paints the table + separator + summary block on stdout. A clamped run
-/// omits the `Total` row; the clamp banner went to stderr earlier.
-fn print_report(
-    entries: &[(usize, u128)],
-    counts: &[u128],
-    n: usize,
-    min_length: usize,
-    max_length: usize,
-    effective: usize,
-    human: bool,
-) {
-    let total_str = (effective >= max_length)
-        .then(|| format_count(counts[min_length..=effective].iter().sum(), human));
+/// Renders the per-length table, the separator, and the `Total`/`Points`
+/// summary. `Total` sums every finalised entry, so clamped or interrupted
+/// runs still show the partial total of what was counted; an empty table
+/// omits the separator.
+fn print_report(outcome: &DpRunOutcome, n: usize, opts: RunOptions) {
+    let total_str = (!outcome.entries.is_empty())
+        .then(|| format_count(outcome.entries.iter().map(|&(_, c)| c).sum(), opts.human));
     let points_str = n.to_string();
     let RenderedReport {
         table,
         summary,
         separator_width,
-    } = render_final(entries, human, total_str.as_deref(), &points_str);
+    } = render_final(
+        &outcome.entries,
+        opts.human,
+        total_str.as_deref(),
+        &points_str,
+    );
 
     for line in &table {
         println!("{line}");
     }
-    println!("{}", "─".repeat(separator_width));
+    if !outcome.entries.is_empty() {
+        println!("{}", "─".repeat(separator_width));
+    }
     for line in &summary {
         println!("{line}");
     }
 }
 
-/// `clamp_effective = Some(eff)` restates the truncated cap; `None` is a
-/// clean run.
-fn print_footer(clamp_effective: Option<usize>, elapsed: Duration) {
-    match clamp_effective {
-        Some(effective) => eprintln!("  Counted up to length {effective} in {elapsed:.2?}"),
-        None => eprintln!("  Counted in {elapsed:.2?}"),
+fn print_footer(outcome: &DpRunOutcome) {
+    let elapsed = outcome.elapsed;
+    if outcome.cancelled {
+        match outcome.entries.last() {
+            Some(&(l, _)) => eprintln!("  Interrupted at length {l} after {elapsed:.2?}"),
+            None => eprintln!("  Interrupted after {elapsed:.2?}"),
+        }
+    } else if outcome.clamp.is_some() {
+        eprintln!(
+            "  Counted up to length {} in {elapsed:.2?}",
+            outcome.effective
+        );
+    } else {
+        eprintln!("  Counted in {elapsed:.2?}");
     }
 }
