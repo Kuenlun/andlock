@@ -241,7 +241,7 @@ fn drive_dp<M: Mask>(
     let mut last_emitted: Option<usize> = None;
     let mut overflow = false;
 
-    let _ = count_patterns_dp(&mut scratch, n, blocks, effective, |event| {
+    count_patterns_dp(&mut scratch, n, blocks, effective, |event| {
         match event {
             DpEvent::Mask => {
                 if let Some(pb) = count_pb {

@@ -145,36 +145,15 @@ static BINOM: [[usize; SLOTS]; SLOTS] = {
     t
 };
 
-/// Closed-form counts when every move is legal: the falling factorial
-/// `P(n, k) = n * (n-1) * ... * (n-k+1)`. Truncates the returned vector at
-/// the first `k` whose `P(n, k)` overflows `u128`, so callers can detect
-/// the saturation via `counts.len() <= max_length`.
-fn count_unconstrained(n: usize, max_length: usize) -> Vec<u128> {
-    let mut counts = vec![0u128; max_length + 1];
-    counts[0] = 1;
-    let mut perm: u128 = 1;
-    for k in 1..=max_length {
-        let Some(next) = perm.checked_mul((n - k + 1) as u128) else {
-            counts.truncate(k);
-            return counts;
-        };
-        perm = next;
-        counts[k] = perm;
-    }
-    counts
-}
-
 /// Counts every valid pattern via layered bitmask dynamic programming.
 ///
 /// `blocks[i * n + j]` is the bitmask of nodes that must already be visited
 /// before the move `i -> j` is legal (see [`crate::grid::compute_blocks`]).
-/// Returns `counts[k] = patterns of length k` for `k in 0..=max_length`;
-/// `counts[0] = 1` is the empty pattern.
+/// Each finalised length is delivered through [`DpEvent::LengthDone`]; the
+/// caller assembles the table from those events.
 ///
-/// `on_event` may return [`ControlFlow::Break`] to abort the run; the partial
-/// `counts` are returned with zeros past the last finalised length, so
-/// callers can still display the rows already emitted via
-/// [`DpEvent::LengthDone`].
+/// `on_event` may return [`ControlFlow::Break`] to abort the run; lengths
+/// already emitted stay valid, no further events fire.
 ///
 /// Two popcount layers are alive at any time (source `p`, destination
 /// `p + 1`), carved out of `scratch` and ping-ponged in place. Each mask of
@@ -195,7 +174,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     blocks: &[M],
     max_length: usize,
     mut on_event: F,
-) -> Vec<u128> {
+) {
     assert!(
         n <= M::MAX_POINTS,
         "N={n} exceeds the maximum of {}",
@@ -207,50 +186,59 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
         "max_length={max_length} must not exceed n={n}"
     );
 
+    // Closed-form fast path: with every move legal, counts[k] is the falling
+    // factorial P(n, k) = n * (n-1) * ... * (n-k+1). Stream each length as it
+    // is computed; bail with Overflow the first time the product wraps u128.
     if blocks.iter().all(|&b| b == M::ZERO) {
-        let counts = count_unconstrained(n, max_length);
-        let truncated = counts.len() <= max_length;
-        for (k, &c) in counts.iter().enumerate() {
+        if on_event(DpEvent::LengthDone {
+            length: 0,
+            count: 1,
+        })
+        .is_break()
+        {
+            return;
+        }
+        let mut perm: u128 = 1;
+        for k in 1..=max_length {
+            let Some(next) = perm.checked_mul((n - k + 1) as u128) else {
+                let _ = on_event(DpEvent::Overflow);
+                return;
+            };
+            perm = next;
             if on_event(DpEvent::LengthDone {
                 length: k,
-                count: c,
+                count: perm,
             })
             .is_break()
             {
-                return counts;
+                return;
             }
         }
-        if truncated {
-            let _ = on_event(DpEvent::Overflow);
-        }
-        return counts;
+        return;
     }
 
-    let mut counts = vec![0u128; max_length + 1];
-    counts[0] = 1;
     if on_event(DpEvent::LengthDone {
         length: 0,
         count: 1,
     })
     .is_break()
     {
-        return counts;
+        return;
     }
     if max_length == 0 {
-        return counts;
+        return;
     }
 
-    counts[1] = n as u128;
     if on_event(DpEvent::LengthDone {
         length: 1,
-        count: counts[1],
+        count: n as u128,
     })
     .is_break()
     {
-        return counts;
+        return;
     }
     if max_length < 2 {
-        return counts;
+        return;
     }
 
     assert_eq!(
@@ -292,6 +280,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
             dp_next[..next_len].fill(0);
         }
 
+        let mut count_next: u128 = 0;
         let mut idx_curr: usize = 0;
         let mut mask: M = M::low_bits(p);
         let last: M = M::low_bits(p) << (n - p);
@@ -354,12 +343,12 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
                 for &(next, dst_idx) in free_slice {
                     let blockers = blocks[row_start + next];
                     if mask & blockers == blockers {
-                        let Some(new_count) = counts[next_p].checked_add(ways) else {
+                        let Some(new_count) = count_next.checked_add(ways) else {
                             overflow = true;
                             break 'outer;
                         };
-                        counts[next_p] = new_count;
-                        // Safe: dp_next[dst_idx] <= counts[next_p] by construction,
+                        count_next = new_count;
+                        // Safe: dp_next[dst_idx] <= count_next by construction,
                         // so if the checked add above succeeded so does this one.
                         if need_dp_next {
                             dp_next[dst_idx] += ways;
@@ -374,11 +363,11 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
             mask = mask.gosper_next();
         }
 
-        // counts[next_p] only takes contributions from popcount-p masks, so
-        // it is final once the layer is done.
+        // count_next only takes contributions from popcount-p masks, so it
+        // is final once the layer is done.
         if on_event(DpEvent::LengthDone {
             length: next_p,
-            count: counts[next_p],
+            count: count_next,
         })
         .is_break()
         {
@@ -390,6 +379,4 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     if overflow {
         let _ = on_event(DpEvent::Overflow);
     }
-
-    counts
 }
