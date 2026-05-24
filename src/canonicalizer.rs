@@ -47,7 +47,7 @@ pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
 /// Comparing `(n * p[j] - sum[j])^2` instead of `(p[j] - centroid[j])^2`
 /// keeps everything in integers without changing the ordering.
 fn pick_centroid_anchor(grid: &GridDefinition) -> Option<usize> {
-    let n = i128::try_from(grid.points.len()).unwrap_or(0);
+    let n = grid.points.len() as i128;
     let sums: Vec<i128> = (0..grid.dimensions)
         .map(|axis| grid.points.iter().map(|p| i128::from(p[axis])).sum())
         .collect();

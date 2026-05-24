@@ -2,13 +2,12 @@
 // andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
-use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser};
 
 use andlock::canonicalizer::canonicalize;
 use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
@@ -16,121 +15,103 @@ use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
 use crate::pipeline::{RunOptions, run_pipeline};
 use crate::preview::render_preview;
 
-const TOP_EXAMPLES: &str = "\
+const EXAMPLES: &str = "\
 Examples:
-  andlock grid 3x3                  Count all patterns on the Android 3x3 grid
-  andlock grid 4x4 --min-length 4   Count Android-style patterns on a 4x4 grid
-  andlock file grid.json            Count patterns on a grid loaded from JSON
-
-Run `andlock <command> --help` for command-specific options.";
-
-const GRID_EXAMPLES: &str = "\
-Examples:
-  andlock grid 3x3
+  andlock 3x3
       Count all patterns on the standard Android 3x3 grid.
 
-  andlock grid 4x4 --min-length 4 --max-length 9
+  andlock 4x4 --min-length 4 --max-length 9
       Count Android-style patterns (length 4-9) on a 4x4 grid.
 
-  andlock grid 3x3 --free-points 1
+  andlock 3x3 --free-points 1
       Add one isolated free point to the 3x3 grid.
 
-  andlock grid 3x3 --export-json > grid.json
-      Save the grid to JSON for reuse with `andlock file`.";
+  andlock 3x3 --export-json > grid.json
+      Save the canonical grid to JSON for reuse.
 
-const FILE_EXAMPLES: &str = "\
-Examples:
-  andlock file grid.json
-      Count patterns on a grid loaded from a file.
+  andlock --file grid.json
+      Count patterns on a grid loaded from JSON.
 
-  andlock grid 3x3 --export-json | andlock file -
-      Pipe a generated grid through stdin.
+  andlock --file -
+      Read the grid from stdin.
 
-  andlock file grid.json --simplify --export-json
-      Print the canonical form of a grid.";
+  andlock 3x3 --export-json | andlock --file -
+      Pipe a generated grid back through stdin.
+
+  andlock --file grid.json --simplify --export-json
+      Print the canonical form of a loaded grid.";
 
 /// Count Android-style unlock patterns on n-dimensional grids.
 ///
-/// Use `andlock grid` to generate a rectangular grid on the fly, or
-/// `andlock file` to load one from JSON. The empty (length-0) pattern
-/// is included in the count unless --min-length excludes it.
+/// Generates a rectangular grid from <DIMS>, or loads one from JSON with
+/// `--file`. The empty (length-0) pattern is included in the count unless
+/// --min-length excludes it. 1D and 2D grids that fit ~40x20 cells get an
+/// ASCII preview; larger or 3D+ grids skip it.
 #[derive(Parser)]
 #[command(
     name = "andlock",
     version,
-    after_long_help = TOP_EXAMPLES,
+    after_long_help = EXAMPLES,
     styles = clap_cargo::style::CLAP_STYLING
 )]
 struct Cli {
-    #[command(subcommand)]
-    command: Command,
-}
-
-#[derive(Subcommand)]
-enum Command {
-    /// Count patterns on a generated rectangular grid.
+    /// Axis sizes joined by 'x' (e.g. "3x3", "10", "2X3x2").
     ///
-    /// Builds the grid in memory from <DIMS>, runs the counter, and prints
-    /// the count for each pattern length. 1D and 2D grids that fit ~40x20
-    /// cells get an ASCII preview; larger or 3D+ grids skip it. Use
-    /// --export-json to dump the grid for reuse with `andlock file`.
-    #[command(after_long_help = GRID_EXAMPLES)]
-    Grid {
-        /// Axis sizes joined by 'x' (e.g. "3x3", "10", "2X3x2").
-        ///
-        /// Each component is a non-negative integer; no surrounding whitespace.
-        dims: String,
+    /// Each component is a non-negative integer; no surrounding whitespace.
+    /// Required unless --file is given.
+    #[arg(
+        value_name = "DIMS",
+        required_unless_present = "file",
+        conflicts_with = "file"
+    )]
+    dims: Option<String>,
 
-        /// Add N isolated points not collinear with any grid pair.
-        ///
-        /// Each free point lives on its own extra dimension to guarantee
-        /// non-collinearity. Total grid + free points must not exceed 127.
-        #[arg(short = 'f', long, default_value_t = 0, value_name = "N")]
-        free_points: usize,
+    /// Load a JSON `GridDefinition` from <PATH>, or `-` to read stdin.
+    #[arg(long, value_name = "PATH")]
+    file: Option<PathBuf>,
 
-        #[command(flatten)]
-        range: RangeArgs,
-
-        #[command(flatten)]
-        memory: MemoryArgs,
-
-        #[command(flatten)]
-        output: OutputArgs,
-    },
-    /// Count patterns on a grid loaded from JSON.
+    /// Add N isolated points not collinear with any grid pair.
     ///
-    /// Loads a `GridDefinition` (0-127 points) from <PATH> and counts its
-    /// patterns. 1D and 2D grids that fit ~40x20 cells get an ASCII preview.
-    /// Pass `-` as <PATH> to read from stdin.
-    #[command(after_long_help = FILE_EXAMPLES)]
-    File {
-        /// Path to a JSON `GridDefinition`, or `-` to read from stdin.
-        path: PathBuf,
+    /// Each free point lives on its own extra dimension to guarantee
+    /// non-collinearity. Total grid + free points must not exceed 127.
+    /// Only valid when generating from <DIMS>.
+    #[arg(
+        short = 'f',
+        long,
+        default_value_t = 0,
+        value_name = "N",
+        conflicts_with = "file"
+    )]
+    free_points: usize,
 
-        /// Canonicalize the grid before exporting (requires --export-json).
-        ///
-        /// Anchors the centroid at the origin and divides each axis by its
-        /// coordinate GCD.
-        #[arg(long, requires = "export_json", help_heading = "Output")]
-        simplify: bool,
+    /// Canonicalize the loaded grid before exporting.
+    ///
+    /// Anchors the centroid at the origin and divides each axis by its
+    /// coordinate GCD. Requires --file and --export-json.
+    #[arg(
+        long,
+        requires = "file",
+        requires = "export_json",
+        help_heading = "Output"
+    )]
+    simplify: bool,
 
-        #[command(flatten)]
-        range: RangeArgs,
+    #[command(flatten)]
+    range: RangeArgs,
 
-        #[command(flatten)]
-        memory: MemoryArgs,
+    #[command(flatten)]
+    memory: MemoryArgs,
 
-        #[command(flatten)]
-        output: OutputArgs,
-    },
+    #[command(flatten)]
+    output: OutputArgs,
 }
 
 #[derive(Args, Copy, Clone)]
 struct OutputArgs {
     /// Print the grid as JSON instead of counting.
     ///
-    /// `grid` emits canonical form; `file` re-emits the loaded grid
-    /// (combine with --simplify to canonicalize). Redirect with
+    /// Generated grids emit canonical form; loaded grids are re-emitted
+    /// verbatim unless --simplify is also passed. Redirect with
     /// `> grid.json` to save.
     #[arg(long, help_heading = "Output")]
     export_json: bool,
@@ -212,40 +193,29 @@ fn resolve_range(range: &RangeArgs, n: usize) -> Result<(usize, usize)> {
 /// # Errors
 /// Propagates parse, I/O, and validation errors to the caller.
 pub fn run() -> Result<()> {
-    match Cli::parse().command {
-        Command::Grid {
-            dims,
-            free_points,
-            range,
-            memory,
-            output,
-        } => {
-            let parsed = parse_dims(&dims).map_err(|e| anyhow!("{e}"))?;
-            let grid = build_grid_definition(&parsed, free_points);
-            run_grid(&grid, Some(free_points), range, memory, output)
+    let cli = Cli::parse();
+    let (grid, known_free_dims) = match (cli.dims.as_deref(), cli.file.as_deref()) {
+        (Some(dims), None) => {
+            let parsed = parse_dims(dims).map_err(|e| anyhow!("{e}"))?;
+            let grid = build_grid_definition(&parsed, cli.free_points);
+            (grid, Some(cli.free_points))
         }
-        Command::File {
-            path,
-            simplify,
-            range,
-            memory,
-            output,
-        } => {
-            let (content, src_label) = read_grid_source(&path)?;
-            let grid: GridDefinition = serde_json::from_str(&content)
+        (None, Some(path)) => {
+            let (content, src_label) = read_grid_source(path)?;
+            let mut grid: GridDefinition = serde_json::from_str(&content)
                 .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?;
-            let grid = if output.export_json && simplify {
-                canonicalize(&grid)
-            } else {
-                grid
-            };
-            run_grid(&grid, None, range, memory, output)
+            if cli.output.export_json && cli.simplify {
+                grid = canonicalize(&grid);
+            }
+            (grid, None)
         }
-    }
+        _ => unreachable!("clap enforces exactly one of <DIMS> or --file"),
+    };
+    run_grid(&grid, known_free_dims, cli.range, cli.memory, cli.output)
 }
 
-/// `known_free_dims` is `Some` only for grids freshly built by `grid`, so the
-/// preview can place free-point stars without re-detecting them.
+/// `known_free_dims` is `Some` only for grids freshly built from `<DIMS>`, so
+/// the preview can place free-point stars without re-detecting them.
 fn run_grid(
     grid: &GridDefinition,
     known_free_dims: Option<usize>,
@@ -286,29 +256,25 @@ fn run_grid(
 }
 
 /// Inline JSON layout: one coordinate vector per line, matching the format
-/// `andlock file` consumes.
+/// `--file` consumes.
 fn grid_to_json(grid: &GridDefinition) -> String {
-    let mut s = String::new();
-    let _ = write!(
-        s,
-        "{{\n  \"dimensions\": {},\n  \"points\": [",
-        grid.dimensions
-    );
-    for (i, p) in grid.points.iter().enumerate() {
-        s.push_str(if i == 0 { "\n    [" } else { ",\n    [" });
-        for (j, c) in p.iter().enumerate() {
-            if j > 0 {
-                s.push_str(", ");
-            }
-            let _ = write!(s, "{c}");
-        }
-        s.push(']');
-    }
-    if !grid.points.is_empty() {
-        s.push_str("\n  ");
-    }
-    s.push_str("]\n}");
-    s
+    let rows: Vec<String> = grid
+        .points
+        .iter()
+        .map(|p| {
+            let coords: Vec<String> = p.iter().map(i32::to_string).collect();
+            format!("    [{}]", coords.join(", "))
+        })
+        .collect();
+    let body = if rows.is_empty() {
+        String::new()
+    } else {
+        format!("\n{}\n  ", rows.join(",\n"))
+    };
+    format!(
+        "{{\n  \"dimensions\": {},\n  \"points\": [{}]\n}}",
+        grid.dimensions, body
+    )
 }
 
 /// Returns the file contents and a label suitable for error messages

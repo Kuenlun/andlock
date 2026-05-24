@@ -11,5 +11,9 @@ mod tty;
 
 fn main() -> anyhow::Result<()> {
     tty::install_handler()?;
-    cli::run()
+    let result = cli::run();
+    if tty::is_cancelled() {
+        std::process::exit(tty::SIGINT_EXIT_CODE);
+    }
+    result
 }

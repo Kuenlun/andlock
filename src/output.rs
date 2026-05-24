@@ -42,9 +42,13 @@ pub fn format_count(count: u128, human: bool) -> String {
     out
 }
 
-/// Streams matching per-length rows above a DP progress anchor, widening the
-/// count column in place as new values arrive. Rows are buffered silently
-/// when no live anchor is available.
+/// Streams matching per-length rows above a DP progress anchor as a single
+/// multi-line bar, widening the count column in place as new values arrive.
+/// Rows are buffered silently when no live anchor is available.
+///
+/// A single bar (rather than one per row) keeps the live table atomic from
+/// indicatif's point of view: `MultiProgress::clear` always wipes it whole,
+/// so terminal scroll cannot strand the top of the table in scrollback.
 pub struct LengthPrinter<'a> {
     min_length: usize,
     max_length: usize,
@@ -56,8 +60,7 @@ pub struct LengthPrinter<'a> {
 struct LivePrinter<'a> {
     mp: &'a MultiProgress,
     anchor: &'a ProgressBar,
-    header_bar: Option<ProgressBar>,
-    row_bars: Vec<ProgressBar>,
+    bar: Option<ProgressBar>,
 }
 
 impl<'a> LengthPrinter<'a> {
@@ -71,8 +74,7 @@ impl<'a> LengthPrinter<'a> {
         let live = anchor.filter(|a| !a.is_hidden()).map(|anchor| LivePrinter {
             mp,
             anchor,
-            header_bar: None,
-            row_bars: Vec::new(),
+            bar: None,
         });
         Self {
             min_length,
@@ -89,70 +91,38 @@ impl<'a> LengthPrinter<'a> {
             return;
         }
         self.entries.push((length, count));
-        if let Some(live) = self.live.as_mut() {
-            if live.header_bar.is_none() {
-                live.header_bar = Some(live.fresh_bar());
-            }
-            live.row_bars.push(live.fresh_bar());
-            self.realign_live();
-        }
+        self.refresh_live();
     }
 
-    fn realign_live(&self) {
-        let Some(live) = self.live.as_ref() else {
+    fn refresh_live(&mut self) {
+        let Self {
+            entries,
+            human,
+            live: Some(live),
+            ..
+        } = self
+        else {
             return;
         };
-        let lines = self.render_lines();
-        if let (Some(bar), Some(header)) = (live.header_bar.as_ref(), lines.first()) {
-            bar.set_message(header.clone());
-        }
-        for (bar, line) in live.row_bars.iter().zip(lines.iter().skip(1)) {
-            bar.set_message(line.clone());
-        }
+        let bar = live.bar.get_or_insert_with(|| {
+            let bar = live.mp.insert_before(live.anchor, ProgressBar::new(0));
+            bar.set_style(row_style());
+            bar
+        });
+        let formatted = format_counts(entries, *human);
+        let width = column_width(&formatted);
+        bar.set_message(render_table_rows(entries, &formatted, width).join("\n"));
     }
 
-    fn render_lines(&self) -> Vec<String> {
-        if self.entries.is_empty() {
-            return Vec::new();
-        }
-        let formatted: Vec<String> = self
-            .entries
-            .iter()
-            .map(|(_, c)| format_count(*c, self.human))
-            .collect();
-        let width = formatted
-            .iter()
-            .map(String::len)
-            .max()
-            .unwrap_or(0)
-            .max(COUNT_HEADER.len());
-        let mut lines = Vec::with_capacity(self.entries.len() + 1);
-        lines.push(format!("  Len  {COUNT_HEADER:>width$}"));
-        for ((length, _), value) in self.entries.iter().zip(formatted.iter()) {
-            lines.push(format!("  {length:>LEN_COL_WIDTH$}  {value:>width$}"));
-        }
-        lines
-    }
-
-    /// Tears down live bars and returns the collected rows for [`render_final`].
+    /// Hides the live bar and returns the collected rows for [`render_final`].
+    /// `finish_and_clear` skips the redraw an unfinished bar would otherwise
+    /// fire from `Drop`, which would repaint the multi-line table after the
+    /// caller's `MultiProgress::clear` and strand its top line in scrollback.
     pub fn finish(mut self) -> Vec<(usize, u128)> {
-        if let Some(live) = self.live.take() {
-            if let Some(bar) = live.header_bar {
-                bar.finish_and_clear();
-            }
-            for bar in live.row_bars {
-                bar.finish_and_clear();
-            }
+        if let Some(LivePrinter { bar: Some(bar), .. }) = self.live.take() {
+            bar.finish_and_clear();
         }
         self.entries
-    }
-}
-
-impl LivePrinter<'_> {
-    fn fresh_bar(&self) -> ProgressBar {
-        let bar = self.mp.insert_before(self.anchor, ProgressBar::new(0));
-        bar.set_style(row_style());
-        bar
     }
 }
 
@@ -173,26 +143,16 @@ pub fn render_final(
     total_str: Option<&str>,
     points_str: &str,
 ) -> RenderedReport {
-    // Rows look like `<GUTTER><label or length><GAP><value>`. To make the
-    // table column and the summary values share a right edge we grow the
-    // count column so `value_w >= summary.len() + label.len() - LEN_COL_WIDTH`.
-    let formatted: Vec<String> = entries
-        .iter()
-        .map(|(_, c)| format_count(*c, human))
-        .collect();
-
+    let formatted = format_counts(entries, human);
+    // Grow the value column so summary labels share the right edge: each
+    // summary row uses (label.len() - LEN_COL_WIDTH) extra slack vs a data row.
     let summary_pad = |label: &str, value: &str| {
         value
             .len()
             .saturating_add(label.len())
             .saturating_sub(LEN_COL_WIDTH)
     };
-    let mut value_w = formatted
-        .iter()
-        .map(String::len)
-        .max()
-        .unwrap_or(0)
-        .max(COUNT_HEADER.len());
+    let mut value_w = column_width(&formatted);
     if let Some(s) = total_str {
         value_w = value_w.max(summary_pad(TOTAL_LABEL, s));
     }
@@ -201,14 +161,7 @@ pub fn render_final(
     let separator_width = GUTTER + LEN_COL_WIDTH + GAP + value_w;
     let summary_value_width = |label: &str| separator_width - (GUTTER + label.len() + GAP);
 
-    let mut table = Vec::new();
-    if !entries.is_empty() {
-        table.reserve_exact(entries.len() + 1);
-        table.push(format!("  Len  {COUNT_HEADER:>value_w$}"));
-        for ((length, _), value) in entries.iter().zip(formatted.iter()) {
-            table.push(format!("  {length:>LEN_COL_WIDTH$}  {value:>value_w$}"));
-        }
-    }
+    let table = render_table_rows(entries, &formatted, value_w);
 
     let mut summary = Vec::new();
     if let Some(s) = total_str {
@@ -223,4 +176,34 @@ pub fn render_final(
         summary,
         separator_width,
     }
+}
+
+fn format_counts(entries: &[(usize, u128)], human: bool) -> Vec<String> {
+    entries
+        .iter()
+        .map(|(_, c)| format_count(*c, human))
+        .collect()
+}
+
+/// Width of the value column: max of the formatted strings and the `Count`
+/// header.
+fn column_width(formatted: &[String]) -> usize {
+    formatted
+        .iter()
+        .map(String::len)
+        .max()
+        .unwrap_or(0)
+        .max(COUNT_HEADER.len())
+}
+
+fn render_table_rows(entries: &[(usize, u128)], formatted: &[String], width: usize) -> Vec<String> {
+    if entries.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(entries.len() + 1);
+    out.push(format!("  Len  {COUNT_HEADER:>width$}"));
+    for ((length, _), value) in entries.iter().zip(formatted) {
+        out.push(format!("  {length:>LEN_COL_WIDTH$}  {value:>width$}"));
+    }
+    out
 }
