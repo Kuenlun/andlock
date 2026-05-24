@@ -202,20 +202,17 @@ fn build_dp_bar(
     if quiet || dp_ticks == 0 {
         return None;
     }
-    let mem_est = dp_table_bytes(n, effective);
+    let mem_str = HumanBytes(dp_table_bytes(n, effective)).to_string();
     let pb = mp.add(ProgressBar::new(dp_ticks));
     pb.set_style(bar_style());
     pb.set_prefix("Counting");
-    pb.set_message(dp_progress_message(1, effective, n, mem_est));
+    pb.set_message(dp_progress_message(1, effective, n, &mem_str));
     pb.enable_steady_tick(Duration::from_millis(80));
     Some(pb)
 }
 
-fn dp_progress_message(current: usize, effective: usize, n: usize, mem_bytes: u64) -> String {
-    format!(
-        "length {current} of {effective}, {n} points, ~{}",
-        HumanBytes(mem_bytes),
-    )
+fn dp_progress_message(current: usize, effective: usize, n: usize, mem_str: &str) -> String {
+    format!("length {current} of {effective}, {n} points, ~{mem_str}")
 }
 
 /// Each `LengthDone` advances the displayed length in lockstep with the DP.
@@ -229,12 +226,11 @@ fn drive_dp<M: Mask>(
     count_pb: Option<&ProgressBar>,
     printer: &mut LengthPrinter<'_>,
 ) -> Result<Option<usize>> {
-    let mem_est = dp_table_bytes(n, effective);
+    let mem_str = HumanBytes(dp_table_bytes(n, effective)).to_string();
     let mut scratch = DpScratch::allocate::<M>(n, blocks, effective).map_err(|e| {
         anyhow!(
-            "could not allocate ~{} of RAM for the DP buffers: {e}. \
-             Lower --max-length or pass --memory-limit to clamp the run to a smaller cap.",
-            HumanBytes(mem_est)
+            "could not allocate ~{mem_str} of RAM for the DP buffers: {e}. \
+             Lower --max-length or pass --memory-limit to clamp the run to a smaller cap."
         )
     })?;
 
@@ -253,7 +249,7 @@ fn drive_dp<M: Mask>(
                 printer.print(length, count);
                 if let Some(pb) = count_pb {
                     let next = (length + 1).min(effective);
-                    pb.set_message(dp_progress_message(next, effective, n, mem_est));
+                    pb.set_message(dp_progress_message(next, effective, n, &mem_str));
                 }
             }
             DpEvent::Overflow => {
