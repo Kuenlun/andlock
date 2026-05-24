@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, anyhow};
 use clap::{Args, CommandFactory, Parser};
 use clap_complete::Shell;
+use serde::Serialize;
+use serde_json::value::RawValue;
 
 use andlock::canonicalizer::canonicalize;
 use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
@@ -243,7 +245,7 @@ fn run_grid(
         if !quiet && (range.min_length.is_some() || range.max_length.is_some()) {
             eprintln!("warning: --min-length and --max-length have no effect with --export-json");
         }
-        println!("{}", grid_to_json(grid));
+        println!("{}", grid_to_json(grid)?);
         return Ok(());
     }
 
@@ -267,29 +269,33 @@ fn run_grid(
 /// Inline JSON layout: one coordinate vector per line, matching the format
 /// `--file` consumes. `free_points` is omitted when zero so grids without
 /// free points round-trip to the minimal representation.
-fn grid_to_json(grid: &GridDefinition) -> String {
-    let rows: Vec<String> = grid
+fn grid_to_json(grid: &GridDefinition) -> Result<String> {
+    #[derive(Serialize)]
+    struct Export {
+        dimensions: usize,
+        points: Vec<Box<RawValue>>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        free_points: Option<usize>,
+    }
+
+    let points = grid
         .points
         .iter()
         .map(|p| {
             let coords: Vec<String> = p.iter().map(i32::to_string).collect();
-            format!("    [{}]", coords.join(", "))
+            RawValue::from_string(format!("[{}]", coords.join(", ")))
         })
-        .collect();
-    let body = if rows.is_empty() {
-        String::new()
-    } else {
-        format!("\n{}\n  ", rows.join(",\n"))
+        .collect::<Result<_, _>>()?;
+    let export = Export {
+        dimensions: grid.dimensions,
+        points,
+        free_points: (grid.free_points != 0).then_some(grid.free_points),
     };
-    let free_field = if grid.free_points == 0 {
-        String::new()
-    } else {
-        format!(",\n  \"free_points\": {}", grid.free_points)
-    };
-    format!(
-        "{{\n  \"dimensions\": {},\n  \"points\": [{}]{free_field}\n}}",
-        grid.dimensions, body
-    )
+    let mut buf = Vec::new();
+    let formatter = serde_json::ser::PrettyFormatter::with_indent(b"  ");
+    let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+    export.serialize(&mut ser)?;
+    Ok(String::from_utf8(buf)?)
 }
 
 /// Returns the file contents and a label suitable for error messages
