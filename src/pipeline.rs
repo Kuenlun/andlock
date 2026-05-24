@@ -52,11 +52,11 @@ fn bar_style() -> ProgressStyle {
 /// the user at `--max-length` or `--memory-limit`.
 ///
 /// # Panics
-/// Panics if `grid.points.len() > mask::MAX_POINTS`. The CLI calls
+/// Panics if `grid.node_count() > mask::MAX_POINTS`. The CLI calls
 /// [`GridDefinition::validate`](andlock::grid::GridDefinition::validate)
 /// upstream, which rejects oversized grids with a user-facing error.
 pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
-    let n = grid.points.len();
+    let n = grid.node_count();
     let mp = tty::progress();
 
     let outcome = match mask::smallest_for(n) {
