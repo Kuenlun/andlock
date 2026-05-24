@@ -83,15 +83,10 @@ struct Cli {
     ///
     /// Free points are abstract nodes without coordinates: they sit on
     /// no line and never block any move. Total grid + free points must
-    /// not exceed 127. With no <DIMS>, builds a grid of N isolated nodes.
-    #[arg(
-        short = 'f',
-        long,
-        default_value_t = 0,
-        value_name = "N",
-        conflicts_with = "file"
-    )]
-    free_points: usize,
+    /// not exceed 127. With no <DIMS>, builds a grid of N isolated nodes
+    /// (N may be 0 for an explicitly empty grid).
+    #[arg(short = 'f', long, value_name = "N", conflicts_with = "file")]
+    free_points: Option<usize>,
 
     #[command(flatten)]
     range: RangeArgs,
@@ -215,17 +210,17 @@ pub fn run() -> Result<()> {
     let mut grid = match (cli.dims.as_deref(), cli.file.as_deref()) {
         (Some(dims), None) => {
             let parsed = parse_dims(dims).map_err(|e| anyhow!("{e}"))?;
-            build_grid_definition(&parsed, cli.free_points)
+            build_grid_definition(&parsed, cli.free_points.unwrap_or(0))
         }
         (None, Some(path)) => {
             let (content, src_label) = read_grid_source(path)?;
             serde_json::from_str(&content)
                 .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?
         }
-        (None, None) if cli.free_points > 0 => GridDefinition {
+        (None, None) if cli.free_points.is_some() => GridDefinition {
             dimensions: 0,
             points: Vec::new(),
-            free_points: cli.free_points,
+            free_points: cli.free_points.unwrap_or(0),
         },
         (None, None) => {
             return Err(anyhow!(
