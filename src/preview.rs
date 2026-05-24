@@ -15,6 +15,7 @@ use andlock::grid::GridDefinition;
 
 const MAX_DISPLAY_COLS: usize = 40;
 const MAX_DISPLAY_ROWS: usize = 20;
+const FREE_ROW_WIDTH: usize = 10;
 const MARGIN: &str = "    ";
 
 /// Build the preview string for `grid`, or `None` to skip silently.
@@ -27,7 +28,7 @@ pub fn render_preview(grid: &GridDefinition) -> Option<String> {
     let n_free = grid.free_points;
 
     if grid.dimensions == 0 || base_points.is_empty() {
-        return (n_free > 0).then(|| vec!["★"; n_free].join(" "));
+        return (n_free > 0).then(|| render_free_block(n_free)).flatten();
     }
 
     let xs0 = unique_sorted(base_points.iter().map(|p| p[0]));
@@ -59,6 +60,29 @@ pub fn render_preview(grid: &GridDefinition) -> Option<String> {
         attach_free_points(&mut rows, n_free);
     }
     Some(rows.join("\n"))
+}
+
+/// Lay out `n` free points as rows of up to `FREE_ROW_WIDTH` stars each.
+fn render_free_block(n: usize) -> Option<String> {
+    let cols = n.min(FREE_ROW_WIDTH);
+    let rows = n.div_ceil(FREE_ROW_WIDTH);
+    if rows > MAX_DISPLAY_ROWS {
+        return None;
+    }
+    let mut out = String::with_capacity(rows * cols * 2);
+    for r in 0..rows {
+        if r > 0 {
+            out.push('\n');
+        }
+        let in_row = (n - r * FREE_ROW_WIDTH).min(FREE_ROW_WIDTH);
+        for c in 0..in_row {
+            if c > 0 {
+                out.push(' ');
+            }
+            out.push('★');
+        }
+    }
+    Some(out)
 }
 
 fn unique_sorted(values: impl Iterator<Item = i32>) -> Vec<i32> {
