@@ -5,6 +5,9 @@
 //! Terminal preview renderer for 0D / 1D / 2D base grids. Base nodes show as
 //! `●`, free points as `★`. Silently returns `None` for grids that are too
 //! large or too high-dimensional to display meaningfully.
+//!
+//! For 2D grids the axis with more unique values is mapped to the horizontal,
+//! so equivalent shapes like `2x4` and `4x2` render in the same wide layout.
 
 use std::collections::HashSet;
 
@@ -27,37 +30,40 @@ pub fn render_preview(grid: &GridDefinition) -> Option<String> {
         return (n_free > 0).then(|| vec!["★"; n_free].join(" "));
     }
 
-    let xs = unique_sorted(base_points.iter().map(|p| p[0]), false);
-    let ys = if grid.dimensions >= 2 {
-        unique_sorted(base_points.iter().map(|p| p[1]), true)
+    let xs0 = unique_sorted(base_points.iter().map(|p| p[0]));
+    let (xs, ys_asc, point_set): (Vec<i32>, Vec<i32>, HashSet<(i32, i32)>) = if grid.dimensions >= 2
+    {
+        let xs1 = unique_sorted(base_points.iter().map(|p| p[1]));
+        let (h, v, xs, ys) = if xs1.len() > xs0.len() {
+            (1, 0, xs1, xs0)
+        } else {
+            (0, 1, xs0, xs1)
+        };
+        let set = base_points.iter().map(|p| (p[h], p[v])).collect();
+        (xs, ys, set)
     } else {
-        vec![0_i32]
+        let set = xs0.iter().map(|&x| (x, 0)).collect();
+        (xs0, vec![0], set)
     };
 
-    if xs.len() > MAX_DISPLAY_COLS || ys.len() > MAX_DISPLAY_ROWS {
+    if xs.len() > MAX_DISPLAY_COLS || ys_asc.len() > MAX_DISPLAY_ROWS {
         return None;
     }
 
-    let point_set: HashSet<(i32, i32)> = if grid.dimensions >= 2 {
-        base_points.iter().map(|p| (p[0], p[1])).collect()
-    } else {
-        xs.iter().map(|&x| (x, 0)).collect()
-    };
-
-    let mut rows: Vec<String> = ys.iter().map(|&y| render_row(&xs, &point_set, y)).collect();
+    let mut rows: Vec<String> = ys_asc
+        .iter()
+        .rev()
+        .map(|&y| render_row(&xs, &point_set, y))
+        .collect();
     if n_free > 0 {
         attach_free_points(&mut rows, n_free);
     }
     Some(rows.join("\n"))
 }
 
-fn unique_sorted(values: impl Iterator<Item = i32>, descending: bool) -> Vec<i32> {
+fn unique_sorted(values: impl Iterator<Item = i32>) -> Vec<i32> {
     let mut v: Vec<i32> = values.collect();
-    if descending {
-        v.sort_unstable_by(|a, b| b.cmp(a));
-    } else {
-        v.sort_unstable();
-    }
+    v.sort_unstable();
     v.dedup();
     v
 }
