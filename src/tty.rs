@@ -2,10 +2,10 @@
 // andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
-use std::io::{self, Write};
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use console::Term;
 use indicatif::MultiProgress;
 
 // 128 + SIGINT on Unix; on Windows any non-zero code that does not collide
@@ -29,14 +29,12 @@ pub fn is_cancelled() -> bool {
 }
 
 /// Installs the process-wide Ctrl+C handler. First press flags cooperative
-/// cancellation so the DP can surface partial results; a second press forces
+/// cancellation so the DP can surface partial results, a second press forces
 /// an immediate exit.
 ///
-/// The first-press path also emits `ESC [ A` (cursor up 1): indicatif pads
-/// the progress bar to terminal width, so the kernel's `^C` echo lands at
-/// the right edge and auto-wraps to the next row. Without compensation
-/// indicatif's next clear is off by one line and leaves the live table's
-/// top row stranded above the final report.
+/// When stderr is a TTY the first press also clears the current row so the
+/// kernel's `^C` echo, which lands wherever the cursor sits, does not leave a
+/// half overwritten progress bar behind: the next tick repaints it intact.
 ///
 /// # Errors
 /// Surfaces the `ctrlc` error when a handler is already registered.
@@ -44,13 +42,13 @@ pub fn install_handler() -> anyhow::Result<()> {
     ctrlc::set_handler(|| {
         if CANCELLED.swap(true, Ordering::SeqCst) {
             let _ = progress().clear();
-            let _ = console::Term::stderr().show_cursor();
-            let _ = io::stderr().flush();
+            let _ = Term::stderr().show_cursor();
             std::process::exit(SIGINT_EXIT_CODE);
         }
-        let mut err = io::stderr().lock();
-        let _ = err.write_all(b"\x1b[A");
-        let _ = err.flush();
+        let term = Term::stderr();
+        if term.is_term() {
+            let _ = term.clear_line();
+        }
     })?;
     Ok(())
 }
