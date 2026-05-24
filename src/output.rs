@@ -122,7 +122,8 @@ impl<'a> LengthPrinter<'a> {
             live.rows.clear();
             live.rows.push(header_row(new_width));
             for (len, c) in entries {
-                live.rows.push(data_row(*len, &format_count(*c, *human), new_width));
+                live.rows
+                    .push(data_row(*len, &format_count(*c, *human), new_width));
             }
         }
         bar.set_message(live.rows.join("\n"));
