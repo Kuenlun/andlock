@@ -48,7 +48,7 @@ fn bar_style() -> ProgressStyle {
 /// Runs the end-to-end counting pipeline for a single grid.
 ///
 /// # Errors
-/// DP scratch allocation failure; the budget estimate in the message points
+/// DP scratch allocation failure. The budget estimate in the message points
 /// the user at `--max-length` or `--memory-limit`.
 ///
 /// # Panics
@@ -82,10 +82,10 @@ struct DpRunOutcome {
     clamp: Option<(u64, u64)>,
     elapsed: Duration,
     cancelled: bool,
-    /// Highest length that was counted exactly before the DP overflowed `u128`;
-    /// `None` when no overflow happened.
+    /// Highest length counted exactly before the DP overflowed `u128`. `None`
+    /// when no overflow happened.
     overflow_after: Option<usize>,
-    /// Sum across every finalised length; `None` when the sum itself overflowed.
+    /// Sum across every finalised length. `None` when the sum itself overflowed.
     total: Option<u128>,
 }
 
@@ -110,8 +110,8 @@ fn run_dp_sequence<M: Mask>(
     }
 
     // All-zero blocks take the closed-form path that allocates no DP buffer,
-    // so the memory clamp must not truncate it (`grid 0 -f 31` would otherwise
-    // be capped against a 143 GiB phantom estimate).
+    // so the memory clamp must not truncate it (`andlock 0 -f 31` would
+    // otherwise be capped against a 143 GiB phantom estimate).
     let unconstrained = blocks.iter().all(|&b| b == M::ZERO);
     let (effective, clamp) = resolve_memory_budget(n, max_length, memory_limit, unconstrained);
 
@@ -119,11 +119,19 @@ fn run_dp_sequence<M: Mask>(
         print_clamp_warning(effective, needed, budget);
     }
 
-    let count_pb = build_dp_bar(mp, n, effective, quiet);
+    let mem_str = HumanBytes(dp_table_bytes(n, effective)).to_string();
+    let count_pb = build_dp_bar(mp, n, effective, &mem_str, quiet);
     let mut printer = LengthPrinter::new(mp, min_length, effective, human, count_pb.as_ref());
 
     let t1 = Instant::now();
-    let overflow_after = drive_dp::<M>(n, &blocks, effective, count_pb.as_ref(), &mut printer)?;
+    let overflow_after = drive_dp::<M>(
+        n,
+        &blocks,
+        effective,
+        &mem_str,
+        count_pb.as_ref(),
+        &mut printer,
+    )?;
     let elapsed = t1.elapsed();
     let cancelled = tty::is_cancelled();
 
@@ -196,17 +204,17 @@ fn build_dp_bar(
     mp: &MultiProgress,
     n: usize,
     effective: usize,
+    mem_str: &str,
     quiet: bool,
 ) -> Option<ProgressBar> {
     let dp_ticks = dp_mask_ticks(n, effective);
     if quiet || dp_ticks == 0 {
         return None;
     }
-    let mem_str = HumanBytes(dp_table_bytes(n, effective)).to_string();
     let pb = mp.add(ProgressBar::new(dp_ticks));
     pb.set_style(bar_style());
     pb.set_prefix("Counting");
-    pb.set_message(dp_progress_message(1, effective, n, &mem_str));
+    pb.set_message(dp_progress_message(1, effective, n, mem_str));
     pb.enable_steady_tick(Duration::from_millis(80));
     Some(pb)
 }
@@ -215,18 +223,18 @@ fn dp_progress_message(current: usize, effective: usize, n: usize, mem_str: &str
     format!("length {current} of {effective}, {n} points, ~{mem_str}")
 }
 
-/// Each `LengthDone` advances the displayed length in lockstep with the DP.
-/// Returns [`ControlFlow::Break`] on SIGINT so the DP yields its partial state.
-/// Result is `Some(last_exact_length)` when the DP stopped because the next
-/// count would not fit in `u128`, `None` otherwise.
+/// Drives the DP, forwarding each `LengthDone` to the printer and updating the
+/// progress bar in lockstep. The closure breaks on SIGINT so the DP can yield
+/// its partial state. Returns `Some(last_exact_length)` when the DP stopped
+/// because the next count would not fit in `u128`, `None` otherwise.
 fn drive_dp<M: Mask>(
     n: usize,
     blocks: &[M],
     effective: usize,
+    mem_str: &str,
     count_pb: Option<&ProgressBar>,
     printer: &mut LengthPrinter<'_>,
 ) -> Result<Option<usize>> {
-    let mem_str = HumanBytes(dp_table_bytes(n, effective)).to_string();
     let mut scratch = DpScratch::allocate::<M>(n, blocks, effective).map_err(|e| {
         anyhow!(
             "could not allocate ~{mem_str} of RAM for the DP buffers: {e}. \
@@ -249,7 +257,7 @@ fn drive_dp<M: Mask>(
                 printer.print(length, count);
                 if let Some(pb) = count_pb {
                     let next = (length + 1).min(effective);
-                    pb.set_message(dp_progress_message(next, effective, n, &mem_str));
+                    pb.set_message(dp_progress_message(next, effective, n, mem_str));
                 }
             }
             DpEvent::Overflow => {
@@ -267,9 +275,9 @@ fn drive_dp<M: Mask>(
 }
 
 /// Renders the per-length table, the separator, and the `Total`/`Points`
-/// summary. `Total` sums every finalised entry, so clamped or interrupted
-/// runs still show the partial total of what was counted; an empty table
-/// omits the separator.
+/// summary. `Total` sums every finalised entry, so clamped or interrupted runs
+/// still show the partial total of what was counted. An empty table omits the
+/// separator.
 fn print_report(outcome: &DpRunOutcome, n: usize, opts: RunOptions) {
     let total_str = outcome
         .total
@@ -305,14 +313,16 @@ fn print_footer(outcome: &DpRunOutcome) {
             Some(&(l, _)) => eprintln!("  Interrupted at length {l} after {elapsed:.2?}"),
             None => eprintln!("  Interrupted after {elapsed:.2?}"),
         }
-    } else if let Some(last) = outcome.overflow_after {
-        eprintln!("  Counted up to length {last} in {elapsed:.2?}");
-    } else if outcome.clamp.is_some() {
-        eprintln!(
-            "  Counted up to length {} in {elapsed:.2?}",
-            outcome.effective
-        );
-    } else {
-        eprintln!("  Counted in {elapsed:.2?}");
+        return;
+    }
+    // Overflow and clamp both stop the run at a specific length: the last
+    // exact length on overflow, or `--memory-limit`'s cap on clamp. Either
+    // way the footer reports the same shape.
+    let stopped_at = outcome
+        .overflow_after
+        .or_else(|| outcome.clamp.map(|_| outcome.effective));
+    match stopped_at {
+        Some(last) => eprintln!("  Counted up to length {last} in {elapsed:.2?}"),
+        None => eprintln!("  Counted in {elapsed:.2?}"),
     }
 }

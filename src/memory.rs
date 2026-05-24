@@ -9,7 +9,7 @@
 use andlock::counter::{dp_table_bytes, effective_max_length};
 
 /// 80 % of OS-reported available RAM. The 20 % headroom keeps
-/// `Vec::try_reserve_exact` from succeeding by paging into swap.
+/// `Vec::try_reserve_exact` from being satisfied via swap.
 fn detect_memory_budget() -> u64 {
     let mut sys = sysinfo::System::new();
     sys.refresh_memory();

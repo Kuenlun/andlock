@@ -24,7 +24,7 @@ Examples:
       Count all patterns on the standard Android 3x3 grid.
 
   andlock 4x4 --min-length 4 --max-length 9
-      Count Android-style patterns (length 4-9) on a 4x4 grid.
+      Count Android-style patterns of length 4 to 9 on a 4x4 grid.
 
   andlock 3x3 --free-points 1
       Add one isolated free point to the 3x3 grid.
@@ -47,9 +47,9 @@ Examples:
 /// Count Android-style unlock patterns on n-dimensional grids.
 ///
 /// Generates a rectangular grid from <DIMS>, or loads one from JSON with
-/// `--file`. The empty (length-0) pattern is included in the count unless
-/// --min-length excludes it. 1D and 2D grids that fit ~40x20 cells get an
-/// ASCII preview; larger or 3D+ grids skip it.
+/// `--file`. The empty (length-0) pattern is counted unless `--min-length`
+/// excludes it. 1D and 2D grids small enough to fit on screen get an ASCII
+/// preview before the run.
 #[derive(Parser)]
 #[command(
     name = "andlock",
@@ -60,8 +60,8 @@ Examples:
 struct Cli {
     /// Axis sizes joined by 'x' (e.g. "3x3", "10", "2X3x2").
     ///
-    /// Each component is a non-negative integer; no surrounding whitespace.
-    /// Required unless --file is given.
+    /// Each component is a non-negative integer with no surrounding
+    /// whitespace. Required unless `--file` is given.
     #[arg(
         value_name = "DIMS",
         required_unless_present_any = ["file", "completions"],
@@ -94,18 +94,6 @@ struct Cli {
     )]
     free_points: usize,
 
-    /// Canonicalize the loaded grid before exporting.
-    ///
-    /// Anchors the centroid at the origin and divides each axis by its
-    /// coordinate GCD. Requires --file and --export-json.
-    #[arg(
-        long,
-        requires = "file",
-        requires = "export_json",
-        help_heading = "Output"
-    )]
-    simplify: bool,
-
     #[command(flatten)]
     range: RangeArgs,
 
@@ -117,14 +105,27 @@ struct Cli {
 }
 
 #[derive(Args, Copy, Clone)]
+#[allow(clippy::struct_excessive_bools)]
 struct OutputArgs {
     /// Print the grid as JSON instead of counting.
     ///
-    /// Generated grids emit canonical form; loaded grids are re-emitted
-    /// verbatim unless --simplify is also passed. Redirect with
+    /// Generated grids emit canonical form. Loaded grids are re-emitted
+    /// verbatim unless `--simplify` is also passed. Redirect with
     /// `> grid.json` to save.
     #[arg(long, help_heading = "Output")]
     export_json: bool,
+
+    /// Canonicalize the loaded grid before exporting.
+    ///
+    /// Anchors the centroid at the origin and divides each axis by its
+    /// coordinate GCD. Requires `--file` and `--export-json`.
+    #[arg(
+        long,
+        requires = "file",
+        requires = "export_json",
+        help_heading = "Output"
+    )]
+    simplify: bool,
 
     /// Suppress progress, timing, and the grid preview.
     ///
@@ -145,15 +146,15 @@ struct OutputArgs {
 struct MemoryArgs {
     /// Cap peak RAM allocation (e.g. 512M, 2GiB).
     ///
-    /// Accepts plain bytes ("1024") or values with K/M/G/T suffixes (binary
-    /// units; 1 KiB = 1024 B). When the run would allocate more, --max-length
+    /// Accepts plain bytes ("1024") or values with K/M/G/T binary suffixes
+    /// (1 KiB = 1024 B). When the run would allocate more, `--max-length`
     /// is clamped to the largest length that fits and a `warning:` line
-    /// reports the equivalent --max-length value alongside the budget
+    /// reports the equivalent `--max-length` value alongside the budget
     /// shortfall.
     ///
     /// Defaults to ~80% of the OS-reported available RAM, sampled once at
     /// startup. The default guards against the DP silently growing into
-    /// pagefile/swap.
+    /// swap.
     #[arg(
         long,
         value_name = "SIZE",
@@ -167,7 +168,7 @@ struct MemoryArgs {
 struct RangeArgs {
     /// Skip patterns shorter than N points.
     ///
-    /// Defaults to 0 (the empty pattern is included). Use --min-length 4
+    /// Defaults to 0 (the empty pattern is included). Use `--min-length 4`
     /// to match Android's lock-screen minimum.
     #[arg(long, value_name = "N", help_heading = "Pattern length")]
     min_length: Option<usize>,
@@ -200,6 +201,8 @@ fn resolve_range(range: &RangeArgs, n: usize) -> Result<(usize, usize)> {
     Ok((min, max))
 }
 
+/// Parses the CLI, loads or builds the grid, and dispatches to the pipeline.
+///
 /// # Errors
 /// Propagates parse, I/O, and validation errors to the caller.
 pub fn run() -> Result<()> {
@@ -223,7 +226,7 @@ pub fn run() -> Result<()> {
         _ => unreachable!("clap enforces exactly one of <DIMS> or --file"),
     };
     grid.validate().map_err(|e| anyhow!("{e}"))?;
-    if cli.simplify {
+    if cli.output.simplify {
         grid = canonicalize(&grid);
     }
     run_grid(&grid, cli.range, cli.memory, cli.output)
@@ -239,6 +242,7 @@ fn run_grid(
         export_json,
         quiet,
         human,
+        ..
     } = output;
 
     if export_json {

@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use indicatif::MultiProgress;
 
-// 128 + SIGINT on Unix; on Windows any non-zero code that does not collide
+// 128 + SIGINT on Unix. Any non-zero code on Windows that does not collide
 // with Cargo's STATUS_CONTROL_C_EXIT (0xC000013A) banner.
 #[cfg(unix)]
 pub const SIGINT_EXIT_CODE: i32 = 130;
@@ -29,14 +29,8 @@ pub fn is_cancelled() -> bool {
 }
 
 /// Installs the process-wide Ctrl+C handler. First press flags cooperative
-/// cancellation so the DP can surface partial results; a second press forces
+/// cancellation so the DP can surface partial results. A second press forces
 /// an immediate exit.
-///
-/// The first-press path also emits `ESC [ A` (cursor up 1): indicatif pads
-/// the progress bar to terminal width, so the kernel's `^C` echo lands at
-/// the right edge and auto-wraps to the next row. Without compensation
-/// indicatif's next clear is off by one line and leaves the live table's
-/// top row stranded above the final report.
 ///
 /// # Errors
 /// Surfaces the `ctrlc` error when a handler is already registered.
@@ -48,9 +42,25 @@ pub fn install_handler() -> anyhow::Result<()> {
             let _ = io::stderr().flush();
             std::process::exit(SIGINT_EXIT_CODE);
         }
-        let mut err = io::stderr().lock();
-        let _ = err.write_all(b"\x1b[A");
-        let _ = err.flush();
+        compensate_ctrl_c_echo();
     })?;
     Ok(())
+}
+
+/// Realigns the cursor after the kernel's `^C` echo on the first SIGINT so
+/// indicatif's next clear lines up with the live bar. The echo lands at the
+/// right edge of the bar's last row (indicatif pads to terminal width) and
+/// auto-wraps onto a fresh row, leaving indicatif one row off. `ESC [ A`
+/// undoes the wrap.
+///
+/// Skipped when stderr is not a terminal. The kernel only echoes `^C` to a
+/// TTY, and writing a bare escape into a redirected file would just pollute
+/// the captured output.
+fn compensate_ctrl_c_echo() {
+    if !console::Term::stderr().is_term() {
+        return;
+    }
+    let mut err = io::stderr().lock();
+    let _ = err.write_all(b"\x1b[A");
+    let _ = err.flush();
 }
