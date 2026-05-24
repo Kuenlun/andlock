@@ -207,32 +207,9 @@ struct RangeArgs {
 
 /// Parses `--memory-limit` values like "1024", "512M", "2GiB". Suffixes use
 /// binary units (KiB / MiB / …) and are case-insensitive; a bare number is
-/// interpreted as raw bytes. Used as a `clap` `value_parser`, so the
-/// returned `String` error is rendered into the standard CLI diagnostic.
-fn parse_memory_size(s: &str) -> Result<u64, String> {
-    let s = s.trim();
-    if s.is_empty() {
-        return Err("memory size is empty".into());
-    }
-    let split = s.find(|c: char| !c.is_ascii_digit()).unwrap_or(s.len());
-    let (num_str, suffix) = s.split_at(split);
-    let num: u64 = num_str
-        .parse()
-        .map_err(|_| format!("invalid number in memory size: {s:?}"))?;
-    let multiplier: u64 = match suffix.trim().to_ascii_lowercase().as_str() {
-        "" | "b" => 1,
-        "k" | "kb" | "ki" | "kib" => 1024,
-        "m" | "mb" | "mi" | "mib" => 1024u64.pow(2),
-        "g" | "gb" | "gi" | "gib" => 1024u64.pow(3),
-        "t" | "tb" | "ti" | "tib" => 1024u64.pow(4),
-        other => {
-            return Err(format!(
-                "unknown memory size suffix {other:?} (expected one of B, K, M, G, T)"
-            ));
-        }
-    };
-    num.checked_mul(multiplier)
-        .ok_or_else(|| format!("memory size overflows u64: {s:?}"))
+/// interpreted as raw bytes.
+fn parse_memory_size(s: &str) -> Result<u64, parse_size::Error> {
+    parse_size::Config::new().with_binary().parse_size(s)
 }
 
 fn resolve_range(range: &RangeArgs, n: usize) -> Result<(usize, usize)> {
