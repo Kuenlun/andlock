@@ -8,71 +8,27 @@
 
 use std::collections::HashSet;
 
-use andlock::canonicalizer::canonicalize;
 use andlock::grid::GridDefinition;
 
 const MAX_DISPLAY_COLS: usize = 40;
 const MAX_DISPLAY_ROWS: usize = 20;
 const MARGIN: &str = "    ";
 
-/// Counts trailing dimensions matching the free-point signature emitted by
-/// `build_grid_definition`: exactly one coordinate = 1, every other = 0.
-fn detect_free_dims(grid: &GridDefinition) -> usize {
-    (0..grid.dimensions)
-        .rev()
-        .take_while(|&d| {
-            let mut ones = 0usize;
-            let mut non_zero = 0usize;
-            for p in &grid.points {
-                match p[d] {
-                    0 => {}
-                    1 => {
-                        ones += 1;
-                        non_zero += 1;
-                    }
-                    _ => non_zero += 1,
-                }
-            }
-            ones == 1 && non_zero == 1
-        })
-        .count()
-}
-
-/// Build the preview string for `grid`, or `None` to skip silently. Pass
-/// `known_free_dims = Some(n)` when the grid was freshly built by the `grid`
-/// subcommand (already canonical); pass `None` for user-provided grids.
+/// Build the preview string for `grid`, or `None` to skip silently.
 #[must_use]
-pub fn render_preview(grid: &GridDefinition, known_free_dims: Option<usize>) -> Option<String> {
-    let canonical_grid = known_free_dims.is_none().then(|| canonicalize(grid));
-    let display_grid = canonical_grid.as_ref().unwrap_or(grid);
-
-    let free_dims = known_free_dims.unwrap_or_else(|| detect_free_dims(display_grid));
-    let base_dims = display_grid.dimensions.saturating_sub(free_dims);
-    if base_dims > 2 {
+pub fn render_preview(grid: &GridDefinition) -> Option<String> {
+    if grid.dimensions > 2 {
         return None;
     }
+    let base_points = grid.points.as_slice();
+    let n_free = grid.free_points;
 
-    // Generated grids preserve the base-then-free order, so a positional split
-    // works even after canonicalisation zeroes the free-coordinate row. User
-    // grids need the all-zero-tail filter instead.
-    let n_base = display_grid.points.len().saturating_sub(free_dims);
-    let base_points: Vec<&Vec<i32>> = if known_free_dims.is_some() {
-        display_grid.points[..n_base].iter().collect()
-    } else {
-        display_grid
-            .points
-            .iter()
-            .filter(|p| p[base_dims..].iter().all(|&v| v == 0))
-            .collect()
-    };
-    let n_free = display_grid.points.len() - base_points.len();
-
-    if base_dims == 0 || base_points.is_empty() {
+    if grid.dimensions == 0 || base_points.is_empty() {
         return (n_free > 0).then(|| vec!["★"; n_free].join(" "));
     }
 
     let xs = unique_sorted(base_points.iter().map(|p| p[0]), false);
-    let ys = if base_dims >= 2 {
+    let ys = if grid.dimensions >= 2 {
         unique_sorted(base_points.iter().map(|p| p[1]), true)
     } else {
         vec![0_i32]
@@ -82,7 +38,7 @@ pub fn render_preview(grid: &GridDefinition, known_free_dims: Option<usize>) -> 
         return None;
     }
 
-    let point_set: HashSet<(i32, i32)> = if base_dims >= 2 {
+    let point_set: HashSet<(i32, i32)> = if grid.dimensions >= 2 {
         base_points.iter().map(|p| (p[0], p[1])).collect()
     } else {
         xs.iter().map(|&x| (x, 0)).collect()

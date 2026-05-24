@@ -38,6 +38,7 @@ pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
     GridDefinition {
         dimensions: grid.dimensions,
         points,
+        free_points: grid.free_points,
     }
 }
 

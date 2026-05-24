@@ -11,25 +11,37 @@ use crate::mask::Mask;
 /// Maximum supported point count (`= 127`), re-exported from [`crate::mask`].
 pub use crate::mask::MAX_POINTS;
 
-/// Finite set of integer-coordinate nodes in `dimensions`-dimensional space.
+/// Finite set of integer-coordinate base nodes in `dimensions`-dimensional
+/// space, optionally accompanied by `free_points` isolated nodes that sit on
+/// no line and never block any move.
 #[derive(Clone, Deserialize)]
 pub struct GridDefinition {
     pub dimensions: usize,
     pub points: Vec<Vec<i32>>,
+    #[serde(default)]
+    pub free_points: usize,
 }
 
 impl GridDefinition {
+    /// Total node count fed to the DP: base points plus free points.
+    #[must_use]
+    pub const fn node_count(&self) -> usize {
+        self.points.len() + self.free_points
+    }
+
     /// # Errors
-    /// Returns an error when the grid exceeds [`MAX_POINTS`], a point has the
-    /// wrong arity, or two points share coordinates.
+    /// Returns an error when the total node count exceeds [`MAX_POINTS`], a
+    /// base point has the wrong arity, or two base points share coordinates.
     pub fn validate(&self) -> Result<(), String> {
-        let n = self.points.len();
+        let n = self.node_count();
         if n > MAX_POINTS {
             return Err(format!(
-                "{n} points exceeds the supported maximum of {MAX_POINTS}"
+                "{n} nodes ({} base + {} free) exceeds the supported maximum of {MAX_POINTS}",
+                self.points.len(),
+                self.free_points,
             ));
         }
-        let mut seen: HashMap<&Vec<i32>, usize> = HashMap::with_capacity(n);
+        let mut seen: HashMap<&Vec<i32>, usize> = HashMap::with_capacity(self.points.len());
         for (idx, point) in self.points.iter().enumerate() {
             if point.len() != self.dimensions {
                 return Err(format!(
@@ -51,12 +63,16 @@ impl GridDefinition {
 /// Symmetric `n x n` row-major matrix where `blocks[a * n + b]` is the
 /// bitmask of nodes lying strictly on the open segment `(a, b)`.
 ///
+/// `n = grid.node_count()`; the trailing `grid.free_points` indices have all
+/// zero rows and columns because free points never lie on any base segment.
+///
 /// # Panics
-/// Panics if `grid.points.len() > M::MAX_POINTS`; pick `M` via
+/// Panics if `grid.node_count() > M::MAX_POINTS`; pick `M` via
 /// [`crate::mask::smallest_for`].
 #[must_use]
 pub fn compute_blocks<M: Mask>(grid: &GridDefinition) -> Vec<M> {
-    let n = grid.points.len();
+    let n_base = grid.points.len();
+    let n = grid.node_count();
     assert!(
         n <= M::MAX_POINTS,
         "compute_blocks called with n={n} > Mask::MAX_POINTS={}",
@@ -67,9 +83,9 @@ pub fn compute_blocks<M: Mask>(grid: &GridDefinition) -> Vec<M> {
     let mut delta: Vec<i64> = Vec::with_capacity(dim);
     let mut probe_rel: Vec<i64> = Vec::with_capacity(dim);
 
-    for a in 0..n {
+    for a in 0..n_base {
         let origin = &grid.points[a];
-        for b in (a + 1)..n {
+        for b in (a + 1)..n_base {
             let target = &grid.points[b];
 
             delta.clear();
@@ -154,29 +170,13 @@ fn generate_grid_points(dims: &[i32]) -> Vec<Vec<i32>> {
     out
 }
 
-/// Rectangular grid + free points, canonicalised. Each free point lives on
-/// its own orthogonal axis so no collinearity check is ever triggered.
+/// Rectangular base grid with `free_points` isolated extra nodes, base
+/// coordinates canonicalised.
 #[must_use]
 pub fn build_grid_definition(dims: &[i32], free_points: usize) -> GridDefinition {
-    let base_dim = dims.len();
-    let total_dim = base_dim + free_points;
-
-    let mut points: Vec<Vec<i32>> = generate_grid_points(dims)
-        .into_iter()
-        .map(|mut p| {
-            p.resize(total_dim, 0);
-            p
-        })
-        .collect();
-
-    for i in 0..free_points {
-        let mut fp = vec![0i32; total_dim];
-        fp[base_dim + i] = 1;
-        points.push(fp);
-    }
-
     crate::canonicalizer::canonicalize(&GridDefinition {
-        dimensions: total_dim,
-        points,
+        dimensions: dims.len(),
+        points: generate_grid_points(dims),
+        free_points,
     })
 }

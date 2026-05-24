@@ -78,11 +78,11 @@ struct Cli {
     #[arg(long, value_name = "SHELL", exclusive = true)]
     completions: Option<Shell>,
 
-    /// Add N isolated points not collinear with any grid pair.
+    /// Add N free points to the grid.
     ///
-    /// Each free point lives on its own extra dimension to guarantee
-    /// non-collinearity. Total grid + free points must not exceed 127.
-    /// Only valid when generating from <DIMS>.
+    /// Free points are abstract nodes without coordinates: they sit on
+    /// no line and never block any move. Total grid + free points must
+    /// not exceed 127. Only valid when generating from <DIMS>.
     #[arg(
         short = 'f',
         long,
@@ -208,17 +208,15 @@ pub fn run() -> Result<()> {
         clap_complete::generate(shell, &mut cmd, name, &mut io::stdout());
         return Ok(());
     }
-    let (mut grid, known_free_dims) = match (cli.dims.as_deref(), cli.file.as_deref()) {
+    let mut grid = match (cli.dims.as_deref(), cli.file.as_deref()) {
         (Some(dims), None) => {
             let parsed = parse_dims(dims).map_err(|e| anyhow!("{e}"))?;
-            let grid = build_grid_definition(&parsed, cli.free_points);
-            (grid, Some(cli.free_points))
+            build_grid_definition(&parsed, cli.free_points)
         }
         (None, Some(path)) => {
             let (content, src_label) = read_grid_source(path)?;
-            let grid: GridDefinition = serde_json::from_str(&content)
-                .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?;
-            (grid, None)
+            serde_json::from_str(&content)
+                .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?
         }
         _ => unreachable!("clap enforces exactly one of <DIMS> or --file"),
     };
@@ -226,14 +224,11 @@ pub fn run() -> Result<()> {
     if cli.simplify {
         grid = canonicalize(&grid);
     }
-    run_grid(&grid, known_free_dims, cli.range, cli.memory, cli.output)
+    run_grid(&grid, cli.range, cli.memory, cli.output)
 }
 
-/// `known_free_dims` is `Some` only for grids freshly built from `<DIMS>`, so
-/// the preview can place free-point stars without re-detecting them.
 fn run_grid(
     grid: &GridDefinition,
-    known_free_dims: Option<usize>,
     range: RangeArgs,
     memory: MemoryArgs,
     output: OutputArgs,
@@ -252,8 +247,8 @@ fn run_grid(
         return Ok(());
     }
 
-    let (min_length, max_length) = resolve_range(&range, grid.points.len())?;
-    if !quiet && let Some(preview) = render_preview(grid, known_free_dims) {
+    let (min_length, max_length) = resolve_range(&range, grid.node_count())?;
+    if !quiet && let Some(preview) = render_preview(grid) {
         println!("{preview}");
         println!();
     }
@@ -270,7 +265,8 @@ fn run_grid(
 }
 
 /// Inline JSON layout: one coordinate vector per line, matching the format
-/// `--file` consumes.
+/// `--file` consumes. `free_points` is omitted when zero so grids without
+/// free points round-trip to the minimal representation.
 fn grid_to_json(grid: &GridDefinition) -> String {
     let rows: Vec<String> = grid
         .points
@@ -285,8 +281,13 @@ fn grid_to_json(grid: &GridDefinition) -> String {
     } else {
         format!("\n{}\n  ", rows.join(",\n"))
     };
+    let free_field = if grid.free_points == 0 {
+        String::new()
+    } else {
+        format!(",\n  \"free_points\": {}", grid.free_points)
+    };
     format!(
-        "{{\n  \"dimensions\": {},\n  \"points\": [{}]\n}}",
+        "{{\n  \"dimensions\": {},\n  \"points\": [{}]{free_field}\n}}",
         grid.dimensions, body
     )
 }
