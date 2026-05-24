@@ -63,11 +63,11 @@ impl GridDefinition {
 /// Symmetric `n x n` row-major matrix where `blocks[a * n + b]` is the
 /// bitmask of nodes lying strictly on the open segment `(a, b)`.
 ///
-/// `n = grid.node_count()`; the trailing `grid.free_points` indices have all
+/// `n = grid.node_count()`. The trailing `grid.free_points` indices have all
 /// zero rows and columns because free points never lie on any base segment.
 ///
 /// # Panics
-/// Panics if `grid.node_count() > M::MAX_POINTS`; pick `M` via
+/// Panics if `grid.node_count() > M::MAX_POINTS`. Pick `M` via
 /// [`crate::mask::smallest_for`].
 #[must_use]
 pub fn compute_blocks<M: Mask>(grid: &GridDefinition) -> Vec<M> {
