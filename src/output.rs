@@ -61,6 +61,8 @@ struct LivePrinter<'a> {
     mp: &'a MultiProgress,
     anchor: &'a ProgressBar,
     bar: Option<ProgressBar>,
+    width: usize,
+    rows: Vec<String>,
 }
 
 impl<'a> LengthPrinter<'a> {
@@ -75,6 +77,8 @@ impl<'a> LengthPrinter<'a> {
             mp,
             anchor,
             bar: None,
+            width: 0,
+            rows: Vec::new(),
         });
         Self {
             min_length,
@@ -91,10 +95,10 @@ impl<'a> LengthPrinter<'a> {
             return;
         }
         self.entries.push((length, count));
-        self.refresh_live();
+        self.refresh_live(length, count);
     }
 
-    fn refresh_live(&mut self) {
+    fn refresh_live(&mut self, length: usize, count: u128) {
         let Self {
             entries,
             human,
@@ -109,9 +113,19 @@ impl<'a> LengthPrinter<'a> {
             bar.set_style(row_style());
             bar
         });
-        let formatted = format_counts(entries, *human);
-        let width = column_width(&formatted);
-        bar.set_message(render_table_rows(entries, &formatted, width).join("\n"));
+        let value = format_count(count, *human);
+        let new_width = live.width.max(value.len()).max(COUNT_HEADER.len());
+        if new_width == live.width {
+            live.rows.push(data_row(length, &value, new_width));
+        } else {
+            live.width = new_width;
+            live.rows.clear();
+            live.rows.push(header_row(new_width));
+            for (len, c) in entries {
+                live.rows.push(data_row(*len, &format_count(*c, *human), new_width));
+            }
+        }
+        bar.set_message(live.rows.join("\n"));
     }
 
     /// Hides the live bar and returns the collected rows for [`render_final`].
@@ -201,9 +215,17 @@ fn render_table_rows(entries: &[(usize, u128)], formatted: &[String], width: usi
         return Vec::new();
     }
     let mut out = Vec::with_capacity(entries.len() + 1);
-    out.push(format!("  Len  {COUNT_HEADER:>width$}"));
+    out.push(header_row(width));
     for ((length, _), value) in entries.iter().zip(formatted) {
-        out.push(format!("  {length:>LEN_COL_WIDTH$}  {value:>width$}"));
+        out.push(data_row(*length, value, width));
     }
     out
+}
+
+fn header_row(width: usize) -> String {
+    format!("  Len  {COUNT_HEADER:>width$}")
+}
+
+fn data_row(length: usize, value: &str, width: usize) -> String {
+    format!("  {length:>LEN_COL_WIDTH$}  {value:>width$}")
 }
