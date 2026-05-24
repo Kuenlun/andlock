@@ -29,6 +29,9 @@ Examples:
   andlock 3x3 --free-points 1
       Add one isolated free point to the 3x3 grid.
 
+  andlock --free-points 3
+      Count patterns on a grid of 3 isolated free points (no base grid).
+
   andlock 3x3 --export-json > grid.json
       Save the canonical grid to JSON for reuse.
 
@@ -61,12 +64,8 @@ struct Cli {
     /// Axis sizes joined by 'x' (e.g. "3x3", "10", "2X3x2").
     ///
     /// Each component is a non-negative integer with no surrounding
-    /// whitespace. Required unless `--file` is given.
-    #[arg(
-        value_name = "DIMS",
-        required_unless_present_any = ["file", "completions"],
-        conflicts_with = "file"
-    )]
+    /// whitespace. Required unless `--file` or `--free-points` is given.
+    #[arg(value_name = "DIMS", conflicts_with = "file")]
     dims: Option<String>,
 
     /// Load a JSON `GridDefinition` from <PATH>, or `-` to read stdin.
@@ -84,7 +83,7 @@ struct Cli {
     ///
     /// Free points are abstract nodes without coordinates: they sit on
     /// no line and never block any move. Total grid + free points must
-    /// not exceed 127. Only valid when generating from <DIMS>.
+    /// not exceed 127. With no <DIMS>, builds a grid of N isolated nodes.
     #[arg(
         short = 'f',
         long,
@@ -223,7 +222,17 @@ pub fn run() -> Result<()> {
             serde_json::from_str(&content)
                 .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?
         }
-        _ => unreachable!("clap enforces exactly one of <DIMS> or --file"),
+        (None, None) if cli.free_points > 0 => GridDefinition {
+            dimensions: 0,
+            points: Vec::new(),
+            free_points: cli.free_points,
+        },
+        (None, None) => {
+            return Err(anyhow!(
+                "one of <DIMS>, --file, or --free-points is required"
+            ));
+        }
+        (Some(_), Some(_)) => unreachable!("clap rejects <DIMS> together with --file"),
     };
     grid.validate().map_err(|e| anyhow!("{e}"))?;
     if cli.output.simplify {
