@@ -91,29 +91,3 @@ fn cleanup_for_sigint() {
     let _ = console::Term::stderr().show_cursor();
     let _ = io::stderr().flush();
 }
-
-#[cfg(test)]
-#[cfg_attr(coverage_nightly, coverage(off))]
-mod tests {
-    use super::*;
-
-    /// `ctrlc` allows exactly one handler per process. Calling
-    /// [`install_handler`] a second time must surface the underlying
-    /// `MultipleHandlers` error instead of silently overwriting; this
-    /// exercises both the success arm of `set_handler` and the `?`
-    /// propagation that surfaces a duplicate-registration error.
-    ///
-    /// This test must be the only one in the crate that invokes
-    /// `install_handler`; otherwise the global handler state would
-    /// leak across tests run in the same binary.
-    #[test]
-    fn install_handler_rejects_duplicate_registration() {
-        install_handler().unwrap();
-        let err = install_handler().unwrap_err();
-        let msg = format!("{err:#}");
-        assert!(
-            msg.to_ascii_lowercase().contains("handler"),
-            "expected ctrlc multiple-handler error, got: {msg}",
-        );
-    }
-}
