@@ -4,9 +4,10 @@
 
 //! Baseline benchmarks for [`count_patterns_dp`] across representative grids.
 
+use std::hint::black_box;
 use std::ops::ControlFlow;
 
-use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 
 use andlock::canonicalizer::canonicalize;
 use andlock::counter::{DpScratch, count_patterns_dp, dp_mask_ticks, effective_max_length};
