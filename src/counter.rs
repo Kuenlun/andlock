@@ -12,8 +12,8 @@ pub enum DpEvent {
     Mask,
     /// `counts[length]` has received its last contribution and is now final.
     LengthDone { length: usize, count: u128 },
-    /// Counts past the last [`DpEvent::LengthDone`] do not fit in `u128`;
-    /// the run stops here so no inexact value is ever emitted.
+    /// The next count would not fit in `u128`. The run stops at the last
+    /// [`DpEvent::LengthDone`] so no inexact value is ever emitted.
     Overflow,
 }
 
@@ -42,20 +42,21 @@ fn peak_layer_entries(n: usize, max_length: usize) -> u128 {
         .unwrap_or(0)
 }
 
-/// Bytes [`count_patterns_dp`] allocates for `(n, max_length)`: the
-/// `counts` vector plus two ping-pong layer buffers sized to the peak
-/// popcount-layer footprint. Saturates to `u64::MAX` on overflow.
+/// Bytes [`count_patterns_dp`] allocates for `(n, max_length)`: two
+/// ping-pong layer buffers sized to the peak popcount-layer footprint.
+/// Saturates to `u64::MAX` on overflow.
 #[must_use]
 pub fn dp_table_bytes(n: usize, max_length: usize) -> u64 {
     let max_length = max_length.min(n);
-    let counts_bytes = (max_length as u128).saturating_add(1).saturating_mul(16);
     let dp_bytes = peak_layer_entries(n, max_length).saturating_mul(32);
-    u64::try_from(dp_bytes.saturating_add(counts_bytes)).unwrap_or(u64::MAX)
+    u64::try_from(dp_bytes).unwrap_or(u64::MAX)
 }
 
 /// Largest `max_length <= requested` whose [`dp_table_bytes`] fits within
-/// `budget_bytes`. Returns `0` when even length 1 does not fit; the
-/// resulting run still emits the trivial `counts[0] = 1`.
+/// `budget_bytes`.
+///
+/// Returns `0` when even length 1 does not fit, in which case the resulting
+/// run still emits the trivial `counts[0] = 1`.
 ///
 /// `dp_table_bytes` is non-decreasing in `max_length`, so the fit predicate
 /// is monotone and the threshold is located via binary search.
@@ -113,7 +114,7 @@ impl DpScratch {
     }
 }
 
-/// Per-buffer entry count; saturates to `usize::MAX` so an overflowing layer
+/// Per-buffer entry count, saturating to `usize::MAX` so an overflowing layer
 /// surfaces as an alloc failure rather than a silently-truncated buffer.
 fn dp_layer_capacity(n: usize, l: usize) -> usize {
     usize::try_from(peak_layer_entries(n, l)).unwrap_or(usize::MAX)
@@ -158,15 +159,15 @@ static BINOM: [[usize; SLOTS]; SLOTS] = {
 ///
 /// `blocks[i * n + j]` is the bitmask of nodes that must already be visited
 /// before the move `i -> j` is legal (see [`crate::grid::compute_blocks`]).
-/// Each finalised length is delivered through [`DpEvent::LengthDone`]; the
-/// caller assembles the table from those events.
+/// Each finalised length is delivered through [`DpEvent::LengthDone`]. The
+/// caller collects those events to assemble the per-length table.
 ///
-/// `on_event` may return [`ControlFlow::Break`] to abort the run; lengths
-/// already emitted stay valid, no further events fire.
+/// `on_event` may return [`ControlFlow::Break`] to abort the run. Lengths
+/// already emitted stay valid, and no further events fire.
 ///
 /// Two popcount layers are alive at any time (source `p`, destination
 /// `p + 1`), carved out of `scratch` and ping-ponged in place. Each mask of
-/// popcount `p` packs `p` `u128` slots, one per valid endpoint; layer-local
+/// popcount `p` packs `p` `u128` slots, one per valid endpoint. Layer-local
 /// indices are reconstructed via colex-rank prefix/suffix sums instead of a
 /// `2^n` lookup table.
 ///
@@ -197,7 +198,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
 
     // Closed-form fast path: with every move legal, counts[k] is the falling
     // factorial P(n, k) = n * (n-1) * ... * (n-k+1). Stream each length as it
-    // is computed; bail with Overflow the first time the product wraps u128.
+    // is computed, bailing with Overflow the first time the product wraps u128.
     if blocks.iter().all(|&b| b == M::ZERO) {
         if on_event(DpEvent::LengthDone {
             length: 0,
@@ -265,7 +266,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     let mut prefix_sum = [0usize; SLOTS];
     let mut suffix_sum = [0usize; SLOTS];
     let mut bit_pos = [0u32; SLOTS];
-    // (next, dst_idx) per free bit; reused across masks.
+    // (next, dst_idx) per free bit, reused across masks.
     let mut free_meta = [(0usize, 0usize); SLOTS];
 
     let mut overflow = false;
@@ -276,7 +277,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     'outer: for p in 1..max_length {
         let next_p = p + 1;
         // At p == max_length-1 we still accumulate counts[max_length] but
-        // skip dp_next writes; nothing would ever read them.
+        // skip dp_next writes. Nothing would ever read them.
         let need_dp_next = next_p < max_length;
         let next_len = if need_dp_next {
             usize::try_from(binomial(n, next_p).saturating_mul(next_p as u128))

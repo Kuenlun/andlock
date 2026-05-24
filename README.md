@@ -6,50 +6,49 @@
 [![Docs.rs](https://docs.rs/andlock/badge.svg)](https://docs.rs/andlock)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license)
 
-A Rust program that counts all valid patterns over a set of nodes in n-dimensional space, generalizing the Android unlock pattern into a purely mathematical combinatorics problem.
+Count Android-style unlock patterns on n-dimensional grids.
 
----
+The Android lock screen is a combinatorics problem in disguise: how many distinct paths can you draw on a 3x3 grid under the skip rules? andlock answers it, and the same question on any rectangular lattice or custom point set in any number of dimensions.
 
-## Concept
+## Install
 
-The Android lock screen presents a 3×3 grid of points where the user draws a path connecting at least 4 of them. This program takes that idea as a starting point and treats it as a general mathematical problem.
+From crates.io:
 
-The nodes are a finite set of points with integer coordinates in n-dimensional space. The program computes the total number of valid patterns that can be drawn over them, applying the same structural rules as the Android lock screen.
+```bash
+cargo install andlock --locked
+```
 
----
+Or grab a prebuilt binary from the [latest release](https://github.com/Kuenlun/andlock/releases/latest) (Linux, macOS, Windows on x86_64 and aarch64).
 
-## Rules
+## Usage
 
-To form a valid pattern, the sequence of nodes must strictly adhere to the following rules:
+```bash
+# Every valid Android pattern on the canonical 3x3 grid.
+andlock 3x3 --min-length 4
 
-1. **Uniqueness:** A pattern is an ordered sequence of distinct nodes connected pairwise by straight line segments.
-2. **Base Cases:** The empty pattern (length 0) and single-node patterns (length 1) are inherently valid.
-3. **Visibility Constraint:** A move from node A to node B is legal only if every node lying strictly on the segment AB has already been visited. Formally, for any intermediate node C such that C = A + t·(B − A) with t ∈ (0, 1), C must appear earlier in the pattern. If no such intermediate node exists, the move is always legal.
+# Add a free point that sits on no line and never blocks a move (short: -f).
+andlock 3x3 --free-points 1
 
----
+# Load a custom grid from JSON, or pipe one through stdin.
+andlock --file grid.json
+andlock 3x3 --export-json | andlock --file -
 
-## Computational Complexity
+# Group counts with `_` separators and cap peak RAM.
+andlock 6x6 --human --memory-limit 2GiB
+```
 
-If we were to ignore the visibility constraint (Rule 3), any sequence of distinct nodes would be valid, and the total count of patterns over N nodes would be exactly `floor(e · N!)`.
+Run `andlock --help` for every option, or `andlock --completions <SHELL>` to print a shell-completion script.
 
-While Rule 3 filters out invalid intersections and strictly reduces this number, the total count still scales factorially — remaining roughly on the order of `O(N!)`. Because of this combinatorial explosion, computing the exact number of valid patterns becomes incredibly computationally expensive as N grows.
+## The rule
 
----
+A pattern is an ordered sequence of distinct nodes. A move from A to B is legal only when every node lying strictly on the segment AB has already been visited: for any intermediate C = A + t·(B − A) with t ∈ (0, 1), C must appear earlier in the pattern. Moves with no intermediate node are always legal.
+
+The empty pattern and any single node count as valid by convention.
+
+## Cost
+
+Without the visibility rule the count over N nodes would be exactly `floor(e · N!)`. The rule prunes that set, but the result still grows like `O(N!)`. Past 6x6 you will want `--max-length` and `--memory-limit` to keep runs bounded.
 
 ## License
 
-Licensed under either of
-
-- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
-  <https://www.apache.org/licenses/LICENSE-2.0>)
-- MIT license ([LICENSE-MIT](LICENSE-MIT) or
-  <https://opensource.org/licenses/MIT>)
-
-at your option.
-
-### Contribution
-
-Unless you explicitly state otherwise, any contribution intentionally
-submitted for inclusion in the work by you, as defined in the
-Apache-2.0 license, shall be dual licensed as above, without any
-additional terms or conditions.
+Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option. Any contribution intentionally submitted for inclusion in andlock, as defined in the Apache-2.0 license, shall be dual-licensed as above without any additional terms or conditions.
