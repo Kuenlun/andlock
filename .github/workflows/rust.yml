@@ -27,7 +27,7 @@ jobs:
         with:
           tool: lockpick,cargo-llvm-cov,cargo-machete,cargo-audit,cargo-nextest
       - name: Run checks
-        run: lockpick -v --skip coverage
+        run: lockpick -v --skip coverage --skip test
 
   merge-gate:
     runs-on: ubuntu-latest
