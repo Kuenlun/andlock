@@ -7,7 +7,6 @@ use std::io;
 use std::path::PathBuf;
 
 use anyhow::{Result, anyhow};
-use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Args, Parser, Subcommand};
 
 use andlock::canonicalizer::canonicalize;
@@ -16,17 +15,6 @@ use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
 use crate::json_format::pretty_compact_json_value;
 use crate::pipeline::{RunOptions, run_pipeline};
 use crate::preview::render_preview;
-
-// Cargo-like help colours: green headers, cyan flags. Degrades gracefully when NO_COLOR or non-TTY.
-const STYLES: Styles = Styles::styled()
-    .header(
-        AnsiColor::Green
-            .on_default()
-            .effects(Effects::BOLD.insert(Effects::UNDERLINE)),
-    )
-    .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
-    .literal(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
-    .placeholder(AnsiColor::Cyan.on_default());
 
 // Examples shown only with `--help` (kept out of `-h` so the brief view stays scannable).
 
@@ -73,7 +61,7 @@ Examples:
     name = "andlock",
     version,
     after_long_help = TOP_EXAMPLES,
-    styles = STYLES
+    styles = clap_cargo::style::CLAP_STYLING
 )]
 struct Cli {
     #[command(subcommand)]
