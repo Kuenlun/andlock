@@ -56,15 +56,24 @@ pub fn dp_table_bytes(n: usize, max_length: usize) -> u64 {
 /// Largest `max_length <= requested` whose [`dp_table_bytes`] fits within
 /// `budget_bytes`. Returns `0` when even length 1 does not fit; the
 /// resulting run still emits the trivial `counts[0] = 1`.
+///
+/// `dp_table_bytes` is non-decreasing in `max_length`, so the fit predicate
+/// is monotone and the threshold is located via binary search.
 #[must_use]
 pub fn effective_max_length(n: usize, requested: usize, budget_bytes: u64) -> usize {
     let cap = requested.min(n);
-    for l in (1..=cap).rev() {
-        if dp_table_bytes(n, l) <= budget_bytes {
-            return l;
+    let (mut lo, mut hi) = (1, cap);
+    let mut best = 0;
+    while lo <= hi {
+        let mid = lo + (hi - lo) / 2;
+        if dp_table_bytes(n, mid) <= budget_bytes {
+            best = mid;
+            lo = mid + 1;
+        } else {
+            hi = mid - 1;
         }
     }
-    0
+    best
 }
 
 /// Working set [`count_patterns_dp`] needs to run. Allocation failure is
