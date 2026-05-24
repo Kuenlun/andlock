@@ -15,7 +15,7 @@ use crate::grid::GridDefinition;
 
 #[must_use]
 pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
-    let Some(anchor_idx) = pick_centroid_anchor(grid) else {
+    let Some(anchor_idx) = centroid_anchor_index(grid) else {
         return grid.clone();
     };
     let offset = grid.points[anchor_idx].clone();
@@ -47,7 +47,7 @@ pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
 ///
 /// Comparing `(n * p[j] - sum[j])^2` instead of `(p[j] - centroid[j])^2`
 /// keeps everything in integers without changing the ordering.
-fn pick_centroid_anchor(grid: &GridDefinition) -> Option<usize> {
+fn centroid_anchor_index(grid: &GridDefinition) -> Option<usize> {
     let n = grid.points.len() as i128;
     let sums: Vec<i128> = (0..grid.dimensions)
         .map(|axis| grid.points.iter().map(|p| i128::from(p[axis])).sum())
