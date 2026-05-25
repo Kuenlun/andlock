@@ -48,7 +48,7 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
 const ROWS: u16 = 60;
 const COLS: u16 = 120;
-const ARM_TIMEOUT: Duration = Duration::from_secs(15);
+const ARM_TIMEOUT: Duration = Duration::from_mins(1);
 const POLL: Duration = Duration::from_millis(200);
 const SIGINT_EXIT: u32 = 130;
 
