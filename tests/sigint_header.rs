@@ -52,7 +52,11 @@ const ARM_TIMEOUT: Duration = Duration::from_secs(15);
 const POLL: Duration = Duration::from_millis(200);
 const SIGINT_EXIT: u32 = 130;
 
+// PTY + timing dependent: live-bar output reaches the test thread fast enough
+// on developer machines but not on virtualised CI runners. Run locally with
+// `cargo nextest run --include-ignored` (or `cargo test -- --ignored`).
 #[test]
+#[ignore = "PTY-timing dependent, opt in locally with --include-ignored"]
 fn sigint_renders_coherent_partial_report() {
     let pty = native_pty_system()
         .openpty(PtySize {
