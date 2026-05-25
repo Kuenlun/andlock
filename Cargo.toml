@@ -10,6 +10,7 @@ keywords = ["android", "pattern", "unlock", "combinatorics", "counter"]
 categories = ["algorithms", "command-line-utilities", "mathematics"]
 
 [package.metadata.lockpick]
+skip = ["coverage"]
 license-header = ".github/license_header.rs"
 
 [dependencies]
