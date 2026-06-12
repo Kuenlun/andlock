@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
+// andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
+
+//! Grid model: the JSON-loadable definition, dimension-spec parsing, lattice
+//! generation, and the blocking matrix the DP consumes.
 
 use std::collections::HashMap;
 
@@ -11,10 +14,18 @@ use crate::mask::Mask;
 /// Maximum supported point count (`= 127`), re-exported from [`crate::mask`].
 pub use crate::mask::MAX_POINTS;
 
+/// Largest accepted coordinate magnitude (`2^30 - 1`).
+///
+/// With every coordinate in `[-MAX_COORD, MAX_COORD]`, coordinate differences
+/// fit `i32`, so the canonical form of a valid grid is itself a valid grid
+/// and every intermediate the crate computes stays exact.
+pub const MAX_COORD: i32 = (1 << 30) - 1;
+
 /// Finite set of integer-coordinate base nodes in `dimensions`-dimensional
 /// space, optionally accompanied by `free_points` isolated nodes that sit on
 /// no line and never block any move.
 #[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GridDefinition {
     pub dimensions: usize,
     pub points: Vec<Vec<i32>>,
@@ -24,14 +35,17 @@ pub struct GridDefinition {
 
 impl GridDefinition {
     /// Total node count fed to the DP: base points plus free points.
+    /// Saturates instead of wrapping on absurd `free_points` values so that
+    /// [`validate`](Self::validate) rejects them rather than mis-sizing a run.
     #[must_use]
     pub const fn node_count(&self) -> usize {
-        self.points.len() + self.free_points
+        self.points.len().saturating_add(self.free_points)
     }
 
     /// # Errors
     /// Returns an error when the total node count exceeds [`MAX_POINTS`], a
-    /// base point has the wrong arity, or two base points share coordinates.
+    /// base point has the wrong arity, a coordinate falls outside
+    /// `[-MAX_COORD, MAX_COORD]`, or two base points share coordinates.
     pub fn validate(&self) -> Result<(), String> {
         let n = self.node_count();
         if n > MAX_POINTS {
@@ -50,6 +64,15 @@ impl GridDefinition {
                     self.dimensions,
                 ));
             }
+            if let Some(&coord) = point
+                .iter()
+                .find(|c| c.unsigned_abs() > MAX_COORD.unsigned_abs())
+            {
+                return Err(format!(
+                    "point {idx} coordinate {coord} is outside the supported range \
+                     [-{MAX_COORD}, {MAX_COORD}]"
+                ));
+            }
             if let Some(first) = seen.insert(point, idx) {
                 return Err(format!(
                     "points {first} and {idx} have the same coordinates {point:?}"
@@ -65,6 +88,8 @@ impl GridDefinition {
 ///
 /// `n = grid.node_count()`. The trailing `grid.free_points` indices have all
 /// zero rows and columns because free points never lie on any base segment.
+/// Exact over the full `i32` coordinate range: deltas are widened to `i64`
+/// and the proportionality products to `i128`.
 ///
 /// # Panics
 /// Panics if `grid.node_count() > M::MAX_POINTS`. Pick `M` via
@@ -89,7 +114,13 @@ pub fn compute_blocks<M: Mask>(grid: &GridDefinition) -> Vec<M> {
             let target = &grid.points[b];
 
             delta.clear();
-            delta.extend((0..dim).map(|i| i64::from(target[i] - origin[i])));
+            delta.extend((0..dim).map(|i| i64::from(target[i]) - i64::from(origin[i])));
+            // Distinct points differ on some axis; that axis anchors the
+            // proportionality test below. Guard anyway so an unvalidated
+            // duplicate degenerates to "no interior" instead of misfiring.
+            let Some(j0) = delta.iter().position(|&d| d != 0) else {
+                continue;
+            };
 
             for (c, probe) in grid.points.iter().enumerate() {
                 if c == a || c == b {
@@ -100,11 +131,14 @@ pub fn compute_blocks<M: Mask>(grid: &GridDefinition) -> Vec<M> {
                 }
 
                 probe_rel.clear();
-                probe_rel.extend((0..dim).map(|i| i64::from(probe[i] - origin[i])));
+                probe_rel.extend((0..dim).map(|i| i64::from(probe[i]) - i64::from(origin[i])));
 
-                // Collinearity: every pairwise 2-D cross product vanishes.
+                // Collinearity: probe_rel must be proportional to delta. With
+                // delta[j0] != 0, the 2-D cross products against axis j0 alone
+                // are sufficient — O(dim) instead of all-pairs O(dim^2).
                 let collinear = (0..dim).all(|i| {
-                    ((i + 1)..dim).all(|j| probe_rel[i] * delta[j] == probe_rel[j] * delta[i])
+                    i128::from(probe_rel[i]) * i128::from(delta[j0])
+                        == i128::from(probe_rel[j0]) * i128::from(delta[i])
                 });
 
                 if collinear {
@@ -137,8 +171,15 @@ pub fn parse_dims(spec: &str) -> Result<Vec<i32>, String> {
     }
     spec.split(['x', 'X'])
         .map(|part| {
-            let value: i32 = part.parse().map_err(|_| {
-                format!("invalid dimension component '{part}': expected a non-negative integer")
+            let value: i32 = part.parse().map_err(|e: std::num::ParseIntError| {
+                if *e.kind() == std::num::IntErrorKind::PosOverflow {
+                    format!(
+                        "invalid dimension component '{part}': any grid this size would \
+                         exceed the {MAX_POINTS}-node maximum"
+                    )
+                } else {
+                    format!("invalid dimension component '{part}': expected a non-negative integer")
+                }
             })?;
             if value < 0 {
                 return Err(format!(
@@ -172,11 +213,29 @@ fn generate_grid_points(dims: &[i32]) -> Vec<Vec<i32>> {
 
 /// Rectangular base grid with `free_points` isolated extra nodes, base
 /// coordinates canonicalised.
-#[must_use]
-pub fn build_grid_definition(dims: &[i32], free_points: usize) -> GridDefinition {
-    crate::canonicalizer::canonicalize(&GridDefinition {
+///
+/// # Errors
+/// Returns an error when an axis size is negative or the lattice plus free
+/// points would exceed [`MAX_POINTS`] nodes. The count is checked before any
+/// point is materialised, so absurd axis sizes fail fast instead of
+/// exhausting memory.
+pub fn build_grid_definition(dims: &[i32], free_points: usize) -> Result<GridDefinition, String> {
+    let base = dims
+        .iter()
+        .try_fold(1u128, |acc, &d| {
+            u128::try_from(d).ok().map(|d| acc.saturating_mul(d))
+        })
+        .ok_or("axis sizes must be non-negative")?;
+    let total = base.saturating_add(free_points as u128);
+    if total > MAX_POINTS as u128 {
+        return Err(format!(
+            "{total} nodes ({base} base + {free_points} free) exceeds the supported \
+             maximum of {MAX_POINTS}"
+        ));
+    }
+    Ok(crate::canonicalizer::canonicalize(&GridDefinition {
         dimensions: dims.len(),
         points: generate_grid_points(dims),
         free_points,
-    })
+    }))
 }

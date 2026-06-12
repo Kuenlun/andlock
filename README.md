@@ -8,7 +8,7 @@
 
 Count Android-style unlock patterns on n-dimensional grids.
 
-The Android lock screen is a combinatorics problem in disguise: how many distinct paths can you draw on a 3x3 grid under the skip rules? andlock answers it, and the same question on any rectangular lattice or custom point set in any number of dimensions.
+The Android lock screen is a combinatorics problem in disguise: how many distinct paths can you draw on a 3x3 grid under the skip rules? andlock answers it — and the same question on any rectangular lattice or custom point set, in any number of dimensions, exactly.
 
 ## Install
 
@@ -23,21 +23,45 @@ Or grab a prebuilt binary from the [latest release](https://github.com/Kuenlun/a
 ## Usage
 
 ```bash
-# Every valid Android pattern on the canonical 3x3 grid.
+# The classic question: patterns the Android lock screen accepts.
 andlock 3x3 --min-length 4
 
-# Add a free point that sits on no line and never blocks a move (short: -f).
+# Any rectangular lattice, in any number of dimensions.
+andlock 4x4
+andlock 3x3x3
+andlock 10              # ten points on a line
+
+# Free points sit on no line and never block a move (short: -f).
 andlock 3x3 --free-points 1
 
-# Load a custom grid from JSON, or pipe one through stdin.
+# Custom point sets from JSON ('-' reads stdin).
 andlock --file grid.json
 andlock 3x3 --export-json | andlock --file -
 
-# Group counts with `_` separators and cap peak RAM.
-andlock 6x6 --human --memory-limit 2GiB
+# Keep large runs bounded.
+andlock 6x6 --max-length 8 --memory-limit 2GiB --human
 ```
 
-Run `andlock --help` for every option, or `andlock --completions <SHELL>` to print a shell-completion script.
+`andlock 3x3 --min-length 4` previews the grid, then prints one row per pattern length:
+
+```text
+● ● ●
+● ● ●
+● ● ●
+
+  Len     Count
+    4      1624
+    5      7152
+    6     26016
+    7     72912
+    8    140704
+    9    140704
+───────────────
+  Total  389112
+  Points      9
+```
+
+Counts go to stdout; the preview, progress, and warnings go to stderr, so pipes stay clean. Run `andlock --help` for every option or `andlock --completions <SHELL>` for tab completion.
 
 ## The rule
 
@@ -45,9 +69,37 @@ A pattern is an ordered sequence of distinct nodes. A move from A to B is legal 
 
 The empty pattern and any single node count as valid by convention.
 
+## Grid JSON
+
+`--file` loads (and `--export-json` emits) this shape:
+
+```json
+{
+  "dimensions": 2,
+  "points": [
+    [0, 0],
+    [2, 0],
+    [4, 0]
+  ],
+  "free_points": 1
+}
+```
+
+`points` holds integer coordinates with magnitude up to 2³⁰ − 1; `free_points` (optional, default 0) adds isolated nodes. At most 127 nodes in total. `--simplify` rewrites a loaded grid into canonical form — the points above become `[[-1, 0], [0, 0], [1, 0]]` — which never changes any count.
+
 ## Cost
 
-Without the visibility rule the count over N nodes would be exactly `floor(e · N!)`. The rule prunes that set, but the result still grows like `O(N!)`. Past 6x6 you will want `--max-length` and `--memory-limit` to keep runs bounded.
+Without the visibility rule the count over N nodes would be exactly `floor(e · N!)`. The rule prunes that set, but the result still grows like `O(N!)`. Past 6x6 you will want `--max-length` and `--memory-limit` to keep runs bounded; by default andlock caps its tables at 80 % of available RAM and reports the largest `--max-length` that fits.
+
+Every count is exact: arithmetic runs in `u128` with overflow detection, and a run stops at the last length that fits rather than ever printing a wrapped value.
+
+## How it counts
+
+A layered bitmask dynamic program walks visited-sets grouped by population count: Gosper's hack enumerates each layer and colex ranking addresses states inside the two live layers, so memory tracks the largest binomial layers instead of a `2^N` table. The visited mask monomorphises to `u32`/`u64`/`u128`, whichever is the narrowest fit for the grid.
+
+## Exit codes
+
+`0` success · `1` runtime error · `2` usage error · `130` interrupted (Ctrl+C prints the partial table first).
 
 ## License
 

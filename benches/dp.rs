@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
+// andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
 //! Baseline benchmarks for [`count_patterns_dp`] across representative grids.
@@ -9,12 +9,11 @@ use std::ops::ControlFlow;
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
 
-use andlock::canonicalizer::canonicalize;
 use andlock::counter::{DpScratch, count_patterns_dp, dp_mask_ticks, effective_max_length};
 use andlock::grid::{build_grid_definition, compute_blocks};
 use andlock::mask::Mask;
 
-/// Memory cap matching the CLI default, so the bench measures real runs.
+/// Fixed 1 GiB cap so every machine benches the same effective max length.
 const BUDGET: u64 = 1 << 30;
 
 #[allow(clippy::expect_used)]
@@ -25,7 +24,7 @@ fn bench_case<M: Mask>(
     free_points: usize,
     sample_size: usize,
 ) {
-    let grid = canonicalize(&build_grid_definition(dims, free_points));
+    let grid = build_grid_definition(dims, free_points).expect("bench grid within MAX_POINTS");
     let n = grid.node_count();
     let blocks: Vec<M> = compute_blocks::<M>(&grid);
     let max_length = effective_max_length(n, n, BUDGET);
