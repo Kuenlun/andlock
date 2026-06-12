@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/Kuenlun/andlock/compare/v0.3.0...v0.4.0) - 2026-06-12
+
+### Added
+
+- Add `--completions <SHELL>` to print shell completion scripts for Bash, Zsh, Fish, PowerShell, and Elvish, generated via `clap_complete`; the flag is exclusive and bypasses the usual grid arguments ([#59](https://github.com/Kuenlun/andlock/pull/59))
+- Allow building grids from `--free-points` alone: with no `<DIMS>` given, `--free-points N` builds a grid of `N` isolated nodes, and an explicit `-f 0` is accepted as an empty grid. An error is reported only when none of `<DIMS>`, `--file`, or `--free-points` is provided ([#74](https://github.com/Kuenlun/andlock/pull/74), [#75](https://github.com/Kuenlun/andlock/pull/75))
+- Surface partial counts on `Ctrl+C`: the first `SIGINT` requests cooperative cancellation through a `ControlFlow`-returning event callback, so every length finalized so far is still printed together with an `Interrupted at length N after T` footer, while a second `SIGINT` restores the previous immediate-exit behaviour ([#58](https://github.com/Kuenlun/andlock/pull/58))
+- Stop the DP cleanly when counts overflow `u128` via the new `DpEvent::Overflow` variant: both the constrained and closed-form paths truncate at the last exact length, the `Total` row is omitted when the per-length sum would overflow, and stderr warnings name the last exact length ([#60](https://github.com/Kuenlun/andlock/pull/60))
+- Print the memory-clamp notice up front as a bold-yellow `warning:` line — naming the equivalent `--max-length` value alongside the needed and available bytes — before the counting bar starts, and advance a live `length X of Y` readout on the progress bar as each length completes ([#38](https://github.com/Kuenlun/andlock/pull/38))
+
+### Changed
+
+- **BREAKING:** Flatten the CLI: the `grid <DIMS>` and `file <PATH>` subcommands are replaced by a single top-level command accepting positional `<DIMS>` (`andlock 3x3`) or `--file <PATH>` (`--file -` for stdin), with `--simplify` promoted to a top-level flag ([#58](https://github.com/Kuenlun/andlock/pull/58))
+- **BREAKING:** Raise the maximum supported point count from 31 to 127 by replacing the hard-coded `u32` visited-set bitmask with a `Mask` trait over `u32`/`u64`/`u128` widths. `compute_blocks`, `count_patterns_dp`, and `DpScratch::allocate` are now generic over `andlock::mask::Mask`, and the pipeline picks the smallest sufficient width per run so grids of up to 31 points keep the previous `u32` fast path byte-for-byte ([#39](https://github.com/Kuenlun/andlock/pull/39))
+- **BREAKING:** Make `build_grid_definition` return `Result<GridDefinition, String>` and harden validation: grids whose base plus free points exceed `MAX_POINTS` fail before any point is materialised, every coordinate must lie within `±(2³⁰ − 1)` so coordinate differences stay exact, unknown grid JSON fields are rejected, and the collinearity test is widened to `i128` and cut from O(dim²) to O(dim) ([#81](https://github.com/Kuenlun/andlock/pull/81))
+- **BREAKING:** Model free points as a `free_points` count on `GridDefinition` — kept optional via `#[serde(default)]` so existing grid files keep loading — instead of fabricating extra orthogonal axes per free point. The DP and validation now size themselves from `node_count()` (`points.len() + free_points`), and JSON export emits the field only when non-zero ([#63](https://github.com/Kuenlun/andlock/pull/63))
+- **BREAKING:** Emit DP counts via events only: `count_patterns_dp` no longer returns a `Vec<u128>`, and finalized lengths flow exclusively through `DpEvent::LengthDone` ([#62](https://github.com/Kuenlun/andlock/pull/62))
+- **BREAKING:** Collapse canonicalisation into a single fixed-point pass — each axis is scaled by the GCD of its coordinate differences, then recentred on the centroid anchor in the scaled metric — removing the separate public `translate_to_origin` and `compress_axes` functions ([#55](https://github.com/Kuenlun/andlock/pull/55), [#81](https://github.com/Kuenlun/andlock/pull/81))
+- Relicense from GPL-3.0-or-later to `MIT OR Apache-2.0`, the standard Rust dual license ([#40](https://github.com/Kuenlun/andlock/pull/40))
+- Validate and canonicalise the grid once at startup for both input modes, so `--simplify` is honoured for `<DIMS>` input as well as `--file` ([#61](https://github.com/Kuenlun/andlock/pull/61))
+- Improve the grid preview: 2D grids are oriented so the wider axis renders horizontally ([#76](https://github.com/Kuenlun/andlock/pull/76)), free-point previews wrap into rows of up to ten stars ([#77](https://github.com/Kuenlun/andlock/pull/77)), nodes are drawn at their true canonical lattice positions, the output is sized to the terminal width, and the preview is routed to stderr so stdout carries nothing but counts ([#81](https://github.com/Kuenlun/andlock/pull/81))
+- Restyle the progress reporting to mirror cargo's status-line layout, with a right-aligned bold-cyan verb column (`Building`, `Counting`), a bracketed `=>` progress bar, and an ETA tail ([#36](https://github.com/Kuenlun/andlock/pull/36))
+- Report errors on stderr with an `error:` prefix and exit through `ExitCode` instead of panicking, and skip the memory clamp entirely when the platform reports no available RAM ([#81](https://github.com/Kuenlun/andlock/pull/81))
+
+### Fixed
+
+- Clear the current stderr row on `SIGINT` instead of emitting a cursor-up escape that could eat a line of output when the progress bar had not wrapped, and keep redirected (non-TTY) stderr free of escape sequences ([#64](https://github.com/Kuenlun/andlock/pull/64))
+
 ## [0.3.0](https://github.com/Kuenlun/andlock/compare/v0.2.1...v0.3.0) - 2026-05-02
 
 ### Added
