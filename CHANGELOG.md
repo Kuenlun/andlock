@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0](https://github.com/Kuenlun/andlock/compare/v0.3.0...v0.4.0) - 2026-06-12
+
+### Added
+
+- [**breaking**] harden grid validation, canonicalization, and CLI I/O ([#81](https://github.com/Kuenlun/andlock/pull/81))
+- *(preview)* wrap free-point previews into rows of up to ten stars ([#77](https://github.com/Kuenlun/andlock/pull/77))
+- *(preview)* orient 2D grids so the wider axis is horizontal ([#76](https://github.com/Kuenlun/andlock/pull/76))
+- *(cli)* accept -f 0 as an explicit empty grid ([#75](https://github.com/Kuenlun/andlock/pull/75))
+- *(cli)* allow building grids from --free-points alone ([#74](https://github.com/Kuenlun/andlock/pull/74))
+- add criterion dp bench suite and patch sigint repaint ([#71](https://github.com/Kuenlun/andlock/pull/71))
+- stop the dp cleanly when counts overflow u128 ([#60](https://github.com/Kuenlun/andlock/pull/60))
+- *(cli)* add --completions to print shell completion scripts ([#59](https://github.com/Kuenlun/andlock/pull/59))
+- [**breaking**] surface partial counts on sigint and flatten cli ([#58](https://github.com/Kuenlun/andlock/pull/58))
+- *(mask)* [**breaking**] extend point ceiling to 127 via generic mask widths ([#39](https://github.com/Kuenlun/andlock/pull/39))
+- *(pipeline)* surface clamp warning up front and live dp length ([#38](https://github.com/Kuenlun/andlock/pull/38))
+
+### Fixed
+
+- *(tty)* clear current row on sigint instead of cursor-up ([#64](https://github.com/Kuenlun/andlock/pull/64))
+
+### Other
+
+- drop --skip test from lockpick run ([#79](https://github.com/Kuenlun/andlock/pull/79))
+- *(lockpick)* skip coverage stage by default ([#78](https://github.com/Kuenlun/andlock/pull/78))
+- polish docs, prune the pre-commit hook, tighten internals ([#73](https://github.com/Kuenlun/andlock/pull/73))
+- *(deps)* relax version pins and bump criterion and sysinfo ([#72](https://github.com/Kuenlun/andlock/pull/72))
+- *(hooks)* mark pre-commit as executable ([#70](https://github.com/Kuenlun/andlock/pull/70))
+- *(output)* keep refresh_live append-only with a monotonic column width ([#69](https://github.com/Kuenlun/andlock/pull/69))
+- *(pipeline)* format `HumanBytes` once per dp run ([#68](https://github.com/Kuenlun/andlock/pull/68))
+- *(canonicalizer)* rename pick_centroid_anchor to centroid_anchor_index ([#67](https://github.com/Kuenlun/andlock/pull/67))
+- *(cli)* drive grid_to_json through serde ([#66](https://github.com/Kuenlun/andlock/pull/66))
+- *(counter)* binary search effective_max_length ([#65](https://github.com/Kuenlun/andlock/pull/65))
+- *(grid)* model free points as a count, not extra dimensions ([#63](https://github.com/Kuenlun/andlock/pull/63))
+- *(counter)* emit dp counts via events only ([#62](https://github.com/Kuenlun/andlock/pull/62))
+- *(cli)* validate and simplify grids before dispatching ([#61](https://github.com/Kuenlun/andlock/pull/61))
+- *(test)* drop the CI test gate ([#57](https://github.com/Kuenlun/andlock/pull/57))
+- tighten modules and trim docs across the crate ([#55](https://github.com/Kuenlun/andlock/pull/55))
+- *(cli)* inline grid json export and drop json_format ([#54](https://github.com/Kuenlun/andlock/pull/54))
+- *(mask)* collapse Mask impls into a macro ([#53](https://github.com/Kuenlun/andlock/pull/53))
+- *(cli)* delegate memory size parsing to parse-size ([#52](https://github.com/Kuenlun/andlock/pull/52))
+- *(cli)* delegate help colours to clap-cargo ([#51](https://github.com/Kuenlun/andlock/pull/51))
+- drop all inline and integration tests before suite rebuild ([#50](https://github.com/Kuenlun/andlock/pull/50))
+- *(coverage)* drop the CI coverage gate ([#49](https://github.com/Kuenlun/andlock/pull/49))
+- *(license)* delegate header check to lockpick ([#47](https://github.com/Kuenlun/andlock/pull/47))
+- *(coverage)* publish reports to codecov and add status badges ([#46](https://github.com/Kuenlun/andlock/pull/46))
+- tighten repo hygiene and pin toolchain components ([#45](https://github.com/Kuenlun/andlock/pull/45))
+- *(toolchain)* pin nightly rust to 2026-04-15 ([#44](https://github.com/Kuenlun/andlock/pull/44))
+- *(ci)* make coverage and license-header scripts project-portable ([#43](https://github.com/Kuenlun/andlock/pull/43))
+- *(coverage)* enforce 100% coverage gate in CI via shared script ([#41](https://github.com/Kuenlun/andlock/pull/41))
+- relicense to MIT OR Apache-2.0 ([#40](https://github.com/Kuenlun/andlock/pull/40))
+- *(pipeline)* align progress bars with cargo's status-line layout ([#36](https://github.com/Kuenlun/andlock/pull/36))
+
 ## [0.3.0](https://github.com/Kuenlun/andlock/compare/v0.2.1...v0.3.0) - 2026-05-02
 
 ### Added
