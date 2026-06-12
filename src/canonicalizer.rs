@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
+// andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
 //! Canonical-form normalisation for [`GridDefinition`] grids.
@@ -7,30 +7,46 @@
 //! Two grids are equivalent when one can be reached from the other by
 //! integer translation and/or per-axis integer scaling. Both moves preserve
 //! every collinearity, direction, and skip-over relationship the counter
-//! reads. [`canonicalize`] picks the unique smallest representative: anchor
-//! the node closest to the centroid at the origin, then divide each axis by
-//! the GCD of its coordinate magnitudes. Both passes are idempotent.
+//! reads. [`canonicalize`] picks a unique representative: divide each axis by
+//! the GCD of its pairwise coordinate differences, then translate the node
+//! closest to the centroid into the origin. The GCDs are computed on
+//! differences, which makes them translation-invariant, and the anchor is
+//! chosen in the fully scaled metric — so the output is a fixed point and
+//! canonicalising twice yields the same grid.
 
 use crate::grid::GridDefinition;
 
 #[must_use]
 pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
-    let Some(anchor_idx) = centroid_anchor_index(grid) else {
+    if grid.points.is_empty() {
         return grid.clone();
-    };
-    let offset = grid.points[anchor_idx].clone();
-    let gcds: Vec<u32> = (0..grid.dimensions)
-        .map(|axis| axis_gcd(grid, axis, offset[axis]))
+    }
+    // Scale differences to points[0]: they are exact in i64 and divisible by
+    // the axis GCDs. Which member is subtracted does not matter — the GCD of
+    // member differences equals the GCD of all pairwise differences, and the
+    // recentre below erases the interim translation.
+    let divisors: Vec<i64> = (0..grid.dimensions)
+        .map(|axis| axis_divisor(&grid.points, axis))
         .collect();
-
-    let points = grid
+    let scaled: Vec<Vec<i64>> = grid
         .points
         .iter()
         .map(|p| {
             p.iter()
-                .zip(&offset)
-                .zip(&gcds)
-                .map(|((&c, &o), &g)| divide_exact(c - o, g))
+                .zip(&grid.points[0])
+                .zip(&divisors)
+                .map(|((&c, &o), &g)| (i64::from(c) - i64::from(o)) / g)
+                .collect()
+        })
+        .collect();
+
+    let anchor = scaled[centroid_anchor_index(&scaled)].clone();
+    let points = scaled
+        .iter()
+        .map(|p| {
+            p.iter()
+                .zip(&anchor)
+                .map(|(&c, &o)| to_coord(c - o))
                 .collect()
         })
         .collect();
@@ -42,18 +58,43 @@ pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
     }
 }
 
+/// GCD of the pairwise coordinate differences along `axis` (computed against
+/// `points[0]`, which yields the same value), or `1` when the axis is
+/// constant so that division is a no-op.
+fn axis_divisor(points: &[Vec<i32>], axis: usize) -> i64 {
+    let origin = i64::from(points[0][axis]);
+    points
+        .iter()
+        .map(|p| (i64::from(p[axis]) - origin).abs())
+        .fold(0, gcd)
+        .max(1)
+}
+
+/// GCD over non-negative inputs; `gcd(0, x) = x` absorbs zero differences.
+const fn gcd(mut a: i64, mut b: i64) -> i64 {
+    while b != 0 {
+        let t = b;
+        b = a % b;
+        a = t;
+    }
+    a
+}
+
 /// Index of the node minimising squared distance to the centroid, with ties
-/// broken in favour of the lowest index. `None` only on an empty grid.
+/// broken in favour of the lowest index.
 ///
-/// Comparing `(n * p[j] - sum[j])^2` instead of `(p[j] - centroid[j])^2`
-/// keeps everything in integers without changing the ordering.
-fn centroid_anchor_index(grid: &GridDefinition) -> Option<usize> {
-    let n = grid.points.len() as i128;
-    let sums: Vec<i128> = (0..grid.dimensions)
-        .map(|axis| grid.points.iter().map(|p| i128::from(p[axis])).sum())
+/// Comparing `(n * p[axis] - sum[axis])^2` instead of
+/// `(p[axis] - centroid[axis])^2` keeps everything in integers without
+/// changing the ordering. The metric is translation-invariant, which is what
+/// makes the recentring step idempotent.
+fn centroid_anchor_index(points: &[Vec<i64>]) -> usize {
+    let n = points.len() as i128;
+    let dim = points.first().map_or(0, Vec::len);
+    let sums: Vec<i128> = (0..dim)
+        .map(|axis| points.iter().map(|p| i128::from(p[axis])).sum())
         .collect();
 
-    grid.points
+    points
         .iter()
         .enumerate()
         .min_by_key(|(_, p)| {
@@ -65,37 +106,17 @@ fn centroid_anchor_index(grid: &GridDefinition) -> Option<usize> {
                 })
                 .sum::<i128>()
         })
-        .map(|(idx, _)| idx)
+        .map_or(0, |(idx, _)| idx)
 }
 
-/// GCD of `|p[axis] - offset|` across every non-zero translated coordinate.
-/// Returns `0` when the axis is entirely zero after translation, which turns
-/// [`divide_exact`] into a no-op.
-fn axis_gcd(grid: &GridDefinition, axis: usize, offset: i32) -> u32 {
-    grid.points
-        .iter()
-        .filter_map(|p| {
-            let v = (p[axis] - offset).unsigned_abs();
-            (v != 0).then_some(v)
-        })
-        .reduce(gcd)
-        .unwrap_or(0)
-}
-
-const fn gcd(mut a: u32, mut b: u32) -> u32 {
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    a
-}
-
-/// Exact division. `divisor <= 1` is a no-op so the per-axis GCD pass can
-/// pass `0` for zero-only axes. The quotient always fits back in `i32`.
-fn divide_exact(coord: i32, divisor: u32) -> i32 {
-    if divisor <= 1 {
-        return coord;
-    }
-    i32::try_from(i64::from(coord) / i64::from(divisor)).unwrap_or(coord)
+/// Converts a canonical coordinate back to `i32`. Differences of coordinates
+/// within [`crate::grid::MAX_COORD`] always fit.
+///
+/// # Panics
+/// Panics on unvalidated grids whose coordinate differences leave `i32` —
+/// loudly, rather than silently wrapping into a non-equivalent grid.
+fn to_coord(value: i64) -> i32 {
+    i32::try_from(value).unwrap_or_else(|_| {
+        panic!("canonical coordinate {value} does not fit i32; validate the grid first")
+    })
 }

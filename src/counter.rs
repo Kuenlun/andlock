@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
+// andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
 use std::ops::ControlFlow;
@@ -15,6 +15,13 @@ pub enum DpEvent {
     /// The next count would not fit in `u128`. The run stops at the last
     /// [`DpEvent::LengthDone`] so no inexact value is ever emitted.
     Overflow,
+}
+
+/// `true` when no move is ever blocked — every entry of `blocks` is zero —
+/// so the count has a closed form and the DP allocates nothing.
+#[must_use]
+pub fn is_unconstrained<M: Mask>(blocks: &[M]) -> bool {
+    blocks.iter().all(|&b| b == M::ZERO)
 }
 
 /// Exact `C(n, k)` in `u128`, saturating to `u128::MAX` on overflow.
@@ -97,7 +104,7 @@ impl DpScratch {
         blocks: &[M],
         max_length: usize,
     ) -> Result<Self, std::collections::TryReserveError> {
-        let half = if max_length < 2 || blocks.iter().all(|&b| b == M::ZERO) {
+        let half = if max_length < 2 || is_unconstrained(blocks) {
             0
         } else {
             dp_layer_capacity(n, max_length)
@@ -199,7 +206,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     // Closed-form fast path: with every move legal, counts[k] is the falling
     // factorial P(n, k) = n * (n-1) * ... * (n-k+1). Stream each length as it
     // is computed, bailing with Overflow the first time the product wraps u128.
-    if blocks.iter().all(|&b| b == M::ZERO) {
+    if is_unconstrained(blocks) {
         if on_event(DpEvent::LengthDone {
             length: 0,
             count: 1,

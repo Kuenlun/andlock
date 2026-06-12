@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
+// andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
 //! End-to-end counting pipeline: builds the block matrix, drives the DP, and
@@ -13,7 +13,9 @@ use anyhow::{Result, anyhow};
 use console::style;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 
-use andlock::counter::{DpEvent, DpScratch, count_patterns_dp, dp_mask_ticks, dp_table_bytes};
+use andlock::counter::{
+    DpEvent, DpScratch, count_patterns_dp, dp_mask_ticks, dp_table_bytes, is_unconstrained,
+};
 use andlock::grid::{GridDefinition, compute_blocks};
 use andlock::mask::{self, Mask, Width};
 
@@ -112,8 +114,8 @@ fn run_dp_sequence<M: Mask>(
     // All-zero blocks take the closed-form path that allocates no DP buffer,
     // so the memory clamp must not truncate it (`andlock 0 -f 31` would
     // otherwise be capped against a 143 GiB phantom estimate).
-    let unconstrained = blocks.iter().all(|&b| b == M::ZERO);
-    let (effective, clamp) = resolve_memory_budget(n, max_length, memory_limit, unconstrained);
+    let (effective, clamp) =
+        resolve_memory_budget(n, max_length, memory_limit, is_unconstrained(&blocks));
 
     if !quiet && let Some((needed, budget)) = clamp {
         print_clamp_warning(effective, needed, budget);
@@ -140,7 +142,6 @@ fn run_dp_sequence<M: Mask>(
         pb.finish_and_clear();
     }
     let entries = printer.finish();
-    drop(count_pb);
 
     if !quiet && let Some(last) = overflow_after {
         print_overflow_warning(last);
@@ -223,6 +224,10 @@ fn dp_progress_message(current: usize, effective: usize, n: usize, mem_str: &str
     format!("length {current} of {effective}, {n} points, ~{mem_str}")
 }
 
+/// Progress increments are batched: `ProgressBar::inc` takes a lock, and the
+/// DP can fire billions of mask events per run.
+const TICK_BATCH: u64 = 1024;
+
 /// Drives the DP, forwarding each `LengthDone` to the printer and updating the
 /// progress bar in lockstep. The closure breaks on SIGINT so the DP can yield
 /// its partial state. Returns `Some(last_exact_length)` when the DP stopped
@@ -244,18 +249,26 @@ fn drive_dp<M: Mask>(
 
     let mut last_emitted: Option<usize> = None;
     let mut overflow = false;
+    let mut ticks: u64 = 0;
+    let mut flushed: u64 = 0;
 
     count_patterns_dp(&mut scratch, n, blocks, effective, |event| {
         match event {
             DpEvent::Mask => {
-                if let Some(pb) = count_pb {
-                    pb.inc(1);
+                ticks += 1;
+                if ticks - flushed >= TICK_BATCH
+                    && let Some(pb) = count_pb
+                {
+                    pb.inc(ticks - flushed);
+                    flushed = ticks;
                 }
             }
             DpEvent::LengthDone { length, count } => {
                 last_emitted = Some(length);
                 printer.print(length, count);
                 if let Some(pb) = count_pb {
+                    pb.inc(ticks - flushed);
+                    flushed = ticks;
                     let next = (length + 1).min(effective);
                     pb.set_message(dp_progress_message(next, effective, n, mem_str));
                 }

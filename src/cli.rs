@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: MIT OR Apache-2.0
-// andlock - Rust tool to count Android unlock patterns on n-dimensional nodes
+// andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
+
+//! Command-line surface: argument parsing, grid loading, and dispatch into
+//! the counting pipeline.
 
 use std::fs;
 use std::io;
@@ -16,15 +19,18 @@ use andlock::canonicalizer::canonicalize;
 use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
 
 use crate::pipeline::{RunOptions, run_pipeline};
-use crate::preview::render_preview;
+use crate::preview::render_for_terminal;
 
 const EXAMPLES: &str = "\
 Examples:
   andlock 3x3
       Count all patterns on the standard Android 3x3 grid.
 
-  andlock 4x4 --min-length 4 --max-length 9
-      Count Android-style patterns of length 4 to 9 on a 4x4 grid.
+  andlock 3x3 --min-length 4
+      Count only patterns the Android lock screen accepts (4+ points).
+
+  andlock 3x3x3 --max-length 5
+      Count patterns of at most 5 points on a 3D cube.
 
   andlock 3x3 --free-points 1
       Add one isolated free point to the 3x3 grid.
@@ -36,10 +42,7 @@ Examples:
       Save the canonical grid to JSON for reuse.
 
   andlock --file grid.json
-      Count patterns on a grid loaded from JSON.
-
-  andlock --file -
-      Read the grid from stdin.
+      Count patterns on a grid loaded from JSON (`-` reads stdin).
 
   andlock 3x3 --export-json | andlock --file -
       Pipe a generated grid back through stdin.
@@ -111,8 +114,9 @@ struct OutputArgs {
 
     /// Canonicalize the loaded grid before exporting.
     ///
-    /// Anchors the centroid at the origin and divides each axis by its
-    /// coordinate GCD. Requires `--file` and `--export-json`.
+    /// Divides each axis by the GCD of its coordinate differences, then
+    /// anchors the node closest to the centroid at the origin. Requires
+    /// `--file` and `--export-json`.
     #[arg(
         long,
         requires = "file",
@@ -188,9 +192,12 @@ fn resolve_range(range: &RangeArgs, n: usize) -> Result<(usize, usize)> {
         ));
     }
     if min > max {
-        return Err(anyhow!(
-            "--min-length ({min}) must not exceed --max-length ({max})"
-        ));
+        // Mention --max-length only when the user actually set it.
+        return Err(if range.max_length.is_some() {
+            anyhow!("--min-length ({min}) must not exceed --max-length ({max})")
+        } else {
+            anyhow!("--min-length ({min}) exceeds the number of points ({n})")
+        });
     }
     Ok((min, max))
 }
@@ -211,6 +218,7 @@ pub fn run() -> Result<()> {
         (Some(dims), None) => {
             let parsed = parse_dims(dims).map_err(|e| anyhow!("{e}"))?;
             build_grid_definition(&parsed, cli.free_points.unwrap_or(0))
+                .map_err(|e| anyhow!("{e}"))?
         }
         (None, Some(path)) => {
             let (content, src_label) = read_grid_source(path)?;
@@ -258,9 +266,11 @@ fn run_grid(
     }
 
     let (min_length, max_length) = resolve_range(&range, grid.node_count())?;
-    if !quiet && let Some(preview) = render_preview(grid) {
-        println!("{preview}");
-        println!();
+    // The preview is decoration, like progress and warnings: it goes to
+    // stderr so stdout carries nothing but the counts.
+    if !quiet && let Some(preview) = render_for_terminal(grid) {
+        eprintln!("{preview}");
+        eprintln!();
     }
     run_pipeline(
         grid,
