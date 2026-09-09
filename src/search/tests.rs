@@ -10,6 +10,7 @@ fn weighted_accumulation_never_emits_wrapped_counts() -> Result<(), TryReserveEr
         for multiply in [false, true] {
             let blocks = [0u128; 16];
             let mut counter = PrefixCounter {
+                allowed: None,
                 n: 4,
                 blocks: &blocks,
                 full_mask: 15,
@@ -36,6 +37,7 @@ fn seeded_overflow_never_finalizes_a_partial_target() -> Result<(), TryReserveEr
         let blocks = vec![0u128; 41 * 41];
         let reduced = vec![0u128; 40 * 40];
         let mut counter = PrefixCounter {
+            allowed: None,
             n: 41,
             blocks: &blocks,
             full_mask: (1u128 << 41) - 1,
@@ -61,6 +63,7 @@ fn big_targets_accumulate_weighted_continuations_beyond_u128() -> Result<(), Try
     for (tail_length, continuations) in [(1usize, 3u32), (2, 6)] {
         let blocks = [0u128; 16];
         let mut counter = PrefixCounter {
+            allowed: None,
             n: 4,
             blocks: &blocks,
             full_mask: 15,

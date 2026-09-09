@@ -10,6 +10,7 @@ use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
 use serde::Serialize;
 
 use andlock::grid::GridDefinition;
+use andlock::visits::VisitFilters;
 
 const LEN_COL_WIDTH: usize = 3;
 const GUTTER: usize = 2;
@@ -50,6 +51,8 @@ struct JsonCount {
 #[derive(Serialize)]
 struct JsonReport<'a> {
     grid: JsonGrid<'a>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    visits: Option<&'a VisitFilters>,
     requested_range: LengthRange,
     completed_range: Option<LengthRange>,
     counts: Vec<JsonCount>,
@@ -66,6 +69,7 @@ pub fn render_json<C: Display>(
     last_completed: Option<usize>,
     total: Option<&C>,
     status: RunStatus,
+    visits: Option<&VisitFilters>,
 ) -> serde_json::Result<String> {
     let completed_range = last_completed
         .filter(|&last| last >= requested_range.min_length)
@@ -79,6 +83,7 @@ pub fn render_json<C: Display>(
             points: &grid.points,
             free_points: grid.free_points,
         },
+        visits,
         requested_range,
         completed_range,
         counts: entries
@@ -345,6 +350,7 @@ mod tests {
             Some(3),
             Some(&large),
             RunStatus::Complete,
+            None,
         )?)?;
         assert_eq!(report["counts"][0]["count"], "0");
         assert_eq!(

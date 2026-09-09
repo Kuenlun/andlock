@@ -44,3 +44,4 @@ pub mod mask;
 pub mod numeric;
 pub mod search;
 mod symmetry;
+pub mod visits;
