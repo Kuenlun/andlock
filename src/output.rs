@@ -2,10 +2,12 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
-//! Result rendering: the live per-length printer streamed from the DP and the
-//! final unified table + summary block printed once the run finishes.
+//! Result rendering: live per-length counts and the final text or JSON report.
 
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+use serde::Serialize;
+
+use andlock::grid::GridDefinition;
 
 const LEN_COL_WIDTH: usize = 3;
 const GUTTER: usize = 2;
@@ -13,6 +15,84 @@ const GAP: usize = 2;
 const COUNT_HEADER: &str = "Count";
 const TOTAL_LABEL: &str = "Total";
 const POINTS_LABEL: &str = "Points";
+
+#[derive(Copy, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunStatus {
+    Complete,
+    Interrupted,
+    CountOverflow,
+    TotalOverflow,
+    MemoryLimit,
+}
+
+#[derive(Copy, Clone, Serialize)]
+pub struct LengthRange {
+    pub min_length: usize,
+    pub max_length: usize,
+}
+
+#[derive(Serialize)]
+struct JsonGrid<'a> {
+    dimensions: usize,
+    points: &'a [Vec<i32>],
+    free_points: usize,
+}
+
+#[derive(Serialize)]
+struct JsonCount {
+    length: usize,
+    count: String,
+}
+
+#[derive(Serialize)]
+struct JsonReport<'a> {
+    grid: JsonGrid<'a>,
+    requested_range: LengthRange,
+    completed_range: Option<LengthRange>,
+    counts: Vec<JsonCount>,
+    total: Option<String>,
+    status: RunStatus,
+}
+
+/// Serializes finalized selected counts without losing integer precision.
+/// An unstarted selected range has no completed range or total.
+pub fn render_json(
+    grid: &GridDefinition,
+    entries: &[(usize, u128)],
+    requested_range: LengthRange,
+    last_completed: Option<usize>,
+    total: Option<u128>,
+    status: RunStatus,
+) -> serde_json::Result<String> {
+    let completed_range = last_completed
+        .filter(|&last| last >= requested_range.min_length)
+        .map(|last| LengthRange {
+            min_length: requested_range.min_length,
+            max_length: last.min(requested_range.max_length),
+        });
+    let report = JsonReport {
+        grid: JsonGrid {
+            dimensions: grid.dimensions,
+            points: &grid.points,
+            free_points: grid.free_points,
+        },
+        requested_range,
+        completed_range,
+        counts: entries
+            .iter()
+            .map(|&(length, count)| JsonCount {
+                length,
+                count: count.to_string(),
+            })
+            .collect(),
+        total: total
+            .filter(|_| !entries.is_empty())
+            .map(|count| count.to_string()),
+        status,
+    };
+    serde_json::to_string_pretty(&report)
+}
 
 /// `ProgressStyle::with_template(template)`, swapping in `fallback()` on
 /// template parse failure.

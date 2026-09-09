@@ -41,6 +41,9 @@ Examples:
   andlock 3x3 --export-json > grid.json
       Save the canonical grid to JSON for reuse.
 
+  andlock 3x3 --min-length 4 --json > counts.json
+      Save exact counts and completion status as JSON.
+
   andlock --file grid.json
       Count patterns on a grid loaded from JSON (`-` reads stdin).
 
@@ -111,6 +114,14 @@ struct OutputArgs {
     /// `> grid.json` to save.
     #[arg(long, help_heading = "Output")]
     export_json: bool,
+
+    /// Print counts and completion status as one JSON object.
+    ///
+    /// Includes the grid and requested/completed length ranges. Counts and
+    /// totals are decimal strings to preserve u128 precision. Diagnostics
+    /// remain on stderr, and incomplete runs keep their failure exit code.
+    #[arg(long, conflicts_with_all = ["export_json", "human"], help_heading = "Output")]
+    json: bool,
 
     /// Canonicalize the loaded grid before exporting.
     ///
@@ -256,6 +267,7 @@ fn run_grid(
         export_json,
         quiet,
         human,
+        json,
         ..
     } = output;
 
@@ -282,6 +294,7 @@ fn run_grid(
             memory_limit: memory.memory_limit,
             quiet,
             human,
+            json,
         },
     )
 }

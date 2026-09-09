@@ -63,6 +63,10 @@ andlock 6x6 --max-length 8 --memory-limit 2GiB --human
 
 Counts go to stdout; the preview, progress, and warnings go to stderr, so pipes stay clean. Run `andlock --help` for every option or `andlock --completions <SHELL>` for tab completion.
 
+`andlock 3x3 --min-length 4 --json` emits one count report containing `grid`, `requested_range`, `completed_range`, `counts`, `total`, and `status`. Counts and totals are decimal strings, preserving full `u128` precision. Each count has `length` and `count` fields. Ranges have inclusive `min_length` and `max_length` fields.
+
+Status is `complete`, `interrupted`, `count_overflow`, `total_overflow`, or `memory_limit`. Partial reports retain finalized counts and their subtotal. `completed_range` and `total` are `null` when no selected length finished. A total that overflows is also `null`. `--json` cannot be combined with `--human` or `--export-json`, which exports only the reusable grid definition.
+
 ## The rule
 
 A pattern is an ordered sequence of distinct nodes. A move from A to B is legal only when every node lying strictly on the segment AB has already been visited: for any intermediate C = A + t·(B − A) with t ∈ (0, 1), C must appear earlier in the pattern. Moves with no intermediate node are always legal.

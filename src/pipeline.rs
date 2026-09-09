@@ -3,7 +3,7 @@
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
 //! End-to-end counting pipeline: builds the block matrix, drives the DP, and
-//! prints the table + summary block. Dispatches the generic counter to its
+//! prints the final report. Dispatches the generic counter to its
 //! `u32` / `u64` / `u128` monomorphisation per run.
 
 use std::ops::ControlFlow;
@@ -20,7 +20,10 @@ use andlock::grid::{GridDefinition, compute_blocks};
 use andlock::mask::{self, Mask, Width};
 
 use crate::memory::resolve_memory_budget;
-use crate::output::{LengthPrinter, RenderedReport, format_count, render_final, style_or_default};
+use crate::output::{
+    LengthPrinter, LengthRange, RenderedReport, RunStatus, format_count, render_final, render_json,
+    style_or_default,
+};
 use crate::tty;
 
 #[derive(Copy, Clone)]
@@ -30,6 +33,7 @@ pub struct RunOptions {
     pub memory_limit: Option<u64>,
     pub quiet: bool,
     pub human: bool,
+    pub json: bool,
 }
 
 fn spinner_style() -> ProgressStyle {
@@ -69,7 +73,7 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
         None => panic!("n={n} past mask::MAX_POINTS, validate first"),
     }?;
 
-    print_report(&outcome, n, opts);
+    print_report(&outcome, grid, opts)?;
     print_footer(&outcome, opts);
     if outcome.total.is_none() {
         print_total_overflow_warning();
@@ -80,7 +84,7 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
 struct DpRunOutcome {
     entries: Vec<(usize, u128)>,
     elapsed: Duration,
-    cancelled: bool,
+    status: RunStatus,
     /// Highest finalised length, including lengths excluded from the output.
     last_completed: Option<usize>,
     /// Sum across finalised selected lengths. `None` when the sum overflowed.
@@ -115,6 +119,7 @@ fn run_dp_sequence<M: Mask>(
         memory_limit,
         quiet,
         human,
+        ..
     } = opts;
 
     let block_pb = build_block_spinner(mp, n, grid.dimensions, quiet);
@@ -162,11 +167,22 @@ fn run_dp_sequence<M: Mask>(
     let total = entries
         .iter()
         .try_fold(0u128, |acc, &(_, c)| acc.checked_add(c));
+    let status = if cancelled {
+        RunStatus::Interrupted
+    } else if overflow {
+        RunStatus::CountOverflow
+    } else if clamp.is_some() {
+        RunStatus::MemoryLimit
+    } else if total.is_none() {
+        RunStatus::TotalOverflow
+    } else {
+        RunStatus::Complete
+    };
 
     Ok(DpRunOutcome {
         entries,
         elapsed,
-        cancelled,
+        status,
         last_completed,
         total,
     })
@@ -299,16 +315,31 @@ fn drive_dp<M: Mask>(
     Ok((last_emitted, overflow))
 }
 
-/// Renders the per-length table, the separator, and the `Total`/`Points`
-/// summary. `Total` sums every finalised entry, so clamped or interrupted runs
-/// still show the partial total of what was counted. An empty table omits the
-/// separator.
-fn print_report(outcome: &DpRunOutcome, n: usize, opts: RunOptions) {
+/// Prints a JSON report or the per-length table and `Total`/`Points` summary.
+/// Totals cover finalized selected entries, including partial runs.
+fn print_report(outcome: &DpRunOutcome, grid: &GridDefinition, opts: RunOptions) -> Result<()> {
+    if opts.json {
+        println!(
+            "{}",
+            render_json(
+                grid,
+                &outcome.entries,
+                LengthRange {
+                    min_length: opts.min_length,
+                    max_length: opts.max_length,
+                },
+                outcome.last_completed,
+                outcome.total,
+                outcome.status,
+            )?
+        );
+        return Ok(());
+    }
     let total_str = outcome
         .total
         .filter(|_| !outcome.entries.is_empty())
         .map(|t| format_count(t, opts.human));
-    let points_str = n.to_string();
+    let points_str = grid.node_count().to_string();
     let RenderedReport {
         table,
         summary,
@@ -329,11 +360,12 @@ fn print_report(outcome: &DpRunOutcome, n: usize, opts: RunOptions) {
     for line in &summary {
         println!("{line}");
     }
+    Ok(())
 }
 
 fn print_footer(outcome: &DpRunOutcome, opts: RunOptions) {
     let elapsed = outcome.elapsed;
-    if outcome.cancelled {
+    if outcome.status == RunStatus::Interrupted {
         let last = outcome
             .last_completed
             .map_or_else(String::new, |length| format!(" at length {length}"));
@@ -370,7 +402,7 @@ mod tests {
         let outcome = DpRunOutcome {
             entries: printer.finish(),
             elapsed: Duration::ZERO,
-            cancelled: false,
+            status: RunStatus::Complete,
             last_completed,
             total: Some(0),
         };
