@@ -41,5 +41,6 @@ pub mod canonicalizer;
 pub mod counter;
 pub mod grid;
 pub mod mask;
+pub mod numeric;
 pub mod search;
 mod symmetry;

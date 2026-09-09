@@ -18,7 +18,7 @@ use serde_json::value::RawValue;
 use andlock::canonicalizer::canonicalize;
 use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
 
-use crate::pipeline::{RunOptions, run_pipeline};
+use crate::pipeline::{Precision, RunOptions, run_pipeline};
 use crate::preview::render_for_terminal;
 
 const EXAMPLES: &str = "\
@@ -43,6 +43,9 @@ Examples:
 
   andlock 3x3 --min-length 4 --json > counts.json
       Save exact counts and completion status as JSON.
+
+  andlock --free-points 35 --big-counts
+      Count beyond u128 with arbitrary precision.
 
   andlock --file grid.json
       Count patterns on a grid loaded from JSON (`-` reads stdin).
@@ -118,10 +121,16 @@ struct OutputArgs {
     /// Print counts and completion status as one JSON object.
     ///
     /// Includes the grid and requested/completed length ranges. Counts and
-    /// totals are decimal strings to preserve u128 precision. Diagnostics
+    /// totals are decimal strings to preserve full precision. Diagnostics
     /// remain on stderr, and incomplete runs keep their failure exit code.
     #[arg(long, conflicts_with_all = ["export_json", "human"], help_heading = "Output")]
     json: bool,
+
+    /// Use arbitrary precision for counts and totals.
+    ///
+    /// Keeps exact values beyond u128. Can increase runtime on constrained grids.
+    #[arg(long, conflicts_with = "export_json", help_heading = "Resources")]
+    big_counts: bool,
 
     /// Canonicalize the loaded grid before exporting.
     ///
@@ -264,6 +273,7 @@ fn run_grid(
         quiet,
         human,
         json,
+        big_counts,
         ..
     } = output;
 
@@ -291,6 +301,11 @@ fn run_grid(
             quiet,
             human,
             json,
+            precision: if big_counts {
+                Precision::Arbitrary
+            } else {
+                Precision::Fixed
+            },
         },
     )
 }

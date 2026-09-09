@@ -5,6 +5,7 @@
 use std::ops::ControlFlow;
 
 use crate::mask::{self, Mask};
+use crate::numeric::count_unconstrained;
 
 /// Progress event emitted by [`count_patterns_dp`].
 pub enum DpEvent {
@@ -274,31 +275,9 @@ pub(crate) fn count_patterns_seeded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()
     // With every move legal, counts[k] = |starts| * P(n - 1, k - 1).
     // Stream each exact length, stopping before the first product overflow.
     if is_unconstrained(blocks) {
-        if on_event(DpEvent::LengthDone {
-            length: 0,
-            count: 1,
-        })
-        .is_break()
-        {
-            return;
-        }
-        let mut perm = u128::from(starts.count_ones());
-        for k in 1..=max_length {
-            let factor = if k == 1 { 1 } else { n - k + 1 };
-            let Some(next) = perm.checked_mul(factor as u128) else {
-                let _ = on_event(DpEvent::Overflow);
-                return;
-            };
-            perm = next;
-            if on_event(DpEvent::LengthDone {
-                length: k,
-                count: perm,
-            })
-            .is_break()
-            {
-                return;
-            }
-        }
+        count_unconstrained::<u128, _>(n, max_length, u128::from(starts.count_ones()), |event| {
+            on_event(event.into())
+        });
         return;
     }
 

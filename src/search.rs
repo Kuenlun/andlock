@@ -7,12 +7,15 @@
 use std::collections::TryReserveError;
 use std::ops::ControlFlow;
 
+use num_bigint::BigUint;
+
 use crate::counter::{
     DpEvent, DpScratch, count_patterns_dp, count_patterns_seeded, dp_table_bytes,
     effective_max_length, is_unconstrained,
 };
 use crate::grid::GridDefinition;
 use crate::mask::{MAX_POINTS, Mask};
+use crate::numeric::{CountEvent, GlobalCount, count_unconstrained, local_counts_fit};
 use crate::symmetry::starting_orbits;
 
 /// Counting-table allocation and the prefix length used to stay within it.
@@ -31,10 +34,25 @@ pub struct CountPlan {
 /// Panics when `max_length > n` or `n > MAX_POINTS`.
 #[must_use]
 pub fn count_plan(n: usize, max_length: usize, budget: u64) -> CountPlan {
+    count_plan_with::<u128>(n, max_length, budget)
+}
+
+/// Choose a prefix satisfying table storage and the count representation's limits.
+///
+/// Arbitrary-precision accumulation uses continuations whose unconstrained upper
+/// bound fits `u128`, keeping every seeded DP count exact before weighting it.
+///
+/// # Panics
+/// Panics when `max_length > n` or `n > MAX_POINTS`.
+#[must_use]
+pub fn count_plan_with<C: GlobalCount>(n: usize, max_length: usize, budget: u64) -> CountPlan {
     assert!(max_length <= n && n <= MAX_POINTS);
     for prefix_length in 0..=max_length {
         let table_bytes = dp_table_bytes(n - prefix_length, max_length - prefix_length);
-        if table_bytes <= budget {
+        if table_bytes <= budget
+            && (!C::ARBITRARY_PRECISION
+                || local_counts_fit(n - prefix_length, max_length - prefix_length))
+        {
             return CountPlan {
                 prefix_length,
                 table_bytes,
@@ -63,36 +81,61 @@ pub fn count_patterns_bounded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     budget: u64,
     mut on_event: F,
 ) -> Result<(), TryReserveError> {
+    count_patterns_bounded_with::<M, u128, _>(grid, blocks, max_length, budget, |event| {
+        on_event(event.into())
+    })
+}
+
+/// Count with arbitrary-precision global accumulation and compact `u128` continuations.
+///
+/// The table budget and finalized-length event semantics match
+/// [`count_patterns_bounded`]. Exact accumulator payloads need at most 710 bits
+/// for the supported 127 points, separately from the table budget.
+///
+/// # Errors
+/// Returns an allocation error if the selected counting layers cannot be allocated.
+///
+/// # Panics
+/// Panics for an invalid grid, a mismatched block matrix or `max_length > n`.
+pub fn count_patterns_big<M: Mask, F: FnMut(CountEvent<BigUint>) -> ControlFlow<()>>(
+    grid: &GridDefinition,
+    blocks: &[M],
+    max_length: usize,
+    budget: u64,
+    on_event: F,
+) -> Result<(), TryReserveError> {
+    count_patterns_bounded_with(grid, blocks, max_length, budget, on_event)
+}
+
+/// Shared bounded traversal for fixed-width and arbitrary-precision global counts.
+///
+/// # Errors
+/// Returns an allocation error if the selected counting layers cannot be allocated.
+///
+/// # Panics
+/// Panics for an invalid grid, a mismatched block matrix or `max_length > n`.
+pub fn count_patterns_bounded_with<
+    M: Mask,
+    C: GlobalCount,
+    F: FnMut(CountEvent<C>) -> ControlFlow<()>,
+>(
+    grid: &GridDefinition,
+    blocks: &[M],
+    max_length: usize,
+    budget: u64,
+    mut on_event: F,
+) -> Result<(), TryReserveError> {
     let n = grid.node_count();
     assert!(n <= M::MAX_POINTS && max_length <= n);
     assert_eq!(blocks.len(), n * n);
-    let direct_length = if is_unconstrained(blocks) {
-        max_length
-    } else {
-        effective_max_length(n, max_length, budget)
-    };
-    let mut stopped = false;
-    {
-        let mut scratch = DpScratch::allocate(n, blocks, direct_length)?;
-        if direct_length == max_length {
-            count_patterns_dp(&mut scratch, n, blocks, max_length, on_event);
-            return Ok(());
-        }
-        count_patterns_dp(&mut scratch, n, blocks, direct_length, |event| {
-            stopped |= matches!(event, DpEvent::Overflow);
-            let flow = on_event(event);
-            stopped |= flow.is_break();
-            flow
-        });
-    }
-    if stopped {
+    let Some(direct_length) = count_direct(n, blocks, max_length, budget, &mut on_event)? else {
         return Ok(());
-    }
+    };
     let orbits = starting_orbits(grid, blocks);
     // Finish each requested length before starting the next. Lower layers are
     // repeated, but interruption preserves every previously completed count.
     for length in direct_length + 1..=max_length {
-        let plan = count_plan(n, length, budget);
+        let plan = count_plan_with::<C>(n, length, budget);
         let remaining = n - plan.prefix_length;
         let tail_length = length - plan.prefix_length;
         let scratch = DpScratch::allocate_constrained(remaining, tail_length)?;
@@ -102,29 +145,33 @@ pub fn count_patterns_bounded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
             full_mask: M::low_bits(n),
             prefix_length: plan.prefix_length,
             tail_length,
-            cap: length,
-            counts: [0; MAX_POINTS + 1],
+            count: C::default(),
             scratch,
-            reduced: vec![M::ZERO; remaining * remaining],
+            reduced: if tail_length > 1 {
+                vec![M::ZERO; remaining * remaining]
+            } else {
+                Vec::new()
+            },
             on_event: &mut on_event,
             cancelled: false,
+            overflow: false,
         };
         for &(start, weight) in &orbits {
             counter.visit(M::bit(start), start, 1, weight);
             if counter.cancelled {
                 return Ok(());
             }
+            if counter.overflow {
+                break;
+            }
         }
-        if counter.cancelled {
+        if counter.overflow {
+            let _ = (counter.on_event)(CountEvent::Overflow);
             return Ok(());
         }
-        if counter.cap < length {
-            let _ = (counter.on_event)(DpEvent::Overflow);
-            return Ok(());
-        }
-        if (counter.on_event)(DpEvent::LengthDone {
+        if (counter.on_event)(CountEvent::LengthDone {
             length,
-            count: counter.counts[length],
+            count: counter.count,
         })
         .is_break()
         {
@@ -134,26 +181,63 @@ pub fn count_patterns_bounded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     Ok(())
 }
 
-struct PrefixCounter<'a, M, F> {
+/// Return the last direct length when partitioned continuations are still needed.
+fn count_direct<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>(
+    n: usize,
+    blocks: &[M],
+    max_length: usize,
+    budget: u64,
+    on_event: &mut F,
+) -> Result<Option<usize>, TryReserveError> {
+    if is_unconstrained(blocks) {
+        count_unconstrained(n, max_length, n as u128, on_event);
+        return Ok(None);
+    }
+    let mut direct_length = effective_max_length(n, max_length, budget);
+    if C::ARBITRARY_PRECISION {
+        while !local_counts_fit(n, direct_length) {
+            direct_length -= 1;
+        }
+    }
+    let mut scratch = DpScratch::allocate(n, blocks, direct_length)?;
+    if direct_length == max_length {
+        count_patterns_dp(&mut scratch, n, blocks, max_length, |event| {
+            on_event(event.into())
+        });
+        return Ok(None);
+    }
+    let mut stopped = false;
+    count_patterns_dp(&mut scratch, n, blocks, direct_length, |event| {
+        stopped |= matches!(event, DpEvent::Overflow);
+        let flow = on_event(event.into());
+        stopped |= flow.is_break();
+        flow
+    });
+    Ok((!stopped).then_some(direct_length))
+}
+
+struct PrefixCounter<'a, M, C, F> {
     n: usize,
     blocks: &'a [M],
     full_mask: M,
     prefix_length: usize,
     tail_length: usize,
-    cap: usize,
-    counts: [u128; MAX_POINTS + 1],
+    count: C,
     scratch: DpScratch,
     reduced: Vec<M>,
     on_event: F,
     cancelled: bool,
+    overflow: bool,
 }
 
-impl<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>> PrefixCounter<'_, M, F> {
+impl<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>
+    PrefixCounter<'_, M, C, F>
+{
     fn visit(&mut self, visited: M, last: usize, length: usize, weight: u128) {
-        if self.cancelled || length >= self.cap {
+        if self.cancelled || self.overflow {
             return;
         }
-        if (self.on_event)(DpEvent::Mask).is_break() {
+        if (self.on_event)(CountEvent::Mask).is_break() {
             self.cancelled = true;
             return;
         }
@@ -162,18 +246,12 @@ impl<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>> PrefixCounter<'_, M, F> {
             return;
         }
         let mut free = self.full_mask & !visited;
-        while free != M::ZERO && !self.cancelled && length < self.cap {
+        while free != M::ZERO && !self.cancelled && !self.overflow {
             let bit = free & free.wrapping_neg();
             free ^= bit;
             let next = bit.trailing_zeros() as usize;
             if self.blocks[last * self.n + next] & !visited == M::ZERO {
-                let next_length = length + 1;
-                if let Some(count) = self.counts[next_length].checked_add(weight) {
-                    self.counts[next_length] = count;
-                    self.visit(visited | bit, next, next_length, weight);
-                } else {
-                    self.cap = length;
-                }
+                self.visit(visited | bit, next, length + 1, weight);
             }
         }
     }
@@ -190,15 +268,7 @@ impl<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>> PrefixCounter<'_, M, F> {
                     degree += 1;
                 }
             }
-            let length = self.prefix_length + 1;
-            if let Some(count) = degree
-                .checked_mul(weight)
-                .and_then(|value| self.counts[length].checked_add(value))
-            {
-                self.counts[length] = count;
-            } else {
-                self.cap = length - 1;
-            }
+            self.overflow = !self.count.add_scaled(degree, weight);
             return;
         }
         let remaining = self.n - self.prefix_length;
@@ -230,10 +300,9 @@ impl<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>> PrefixCounter<'_, M, F> {
                 self.reduced[a * remaining + b] = mapped;
             }
         }
-        let mut last_local = 0;
-        let prefix = self.prefix_length;
-        let counts = &mut self.counts;
-        let cap = &mut self.cap;
+        let tail_length = self.tail_length;
+        let total = &mut self.count;
+        let overflow = &mut self.overflow;
         let cancelled = &mut self.cancelled;
         let on_event = &mut self.on_event;
         count_patterns_seeded(
@@ -245,27 +314,18 @@ impl<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>> PrefixCounter<'_, M, F> {
             |event| {
                 match event {
                     DpEvent::LengthDone { length, count } => {
-                        last_local = length;
-                        if length > 0 {
-                            let total_length = length + prefix;
-                            if let Some(total) = count
-                                .checked_mul(weight)
-                                .and_then(|value| counts[total_length].checked_add(value))
-                            {
-                                counts[total_length] = total;
-                            } else {
-                                *cap = total_length - 1;
-                            }
+                        if length == tail_length {
+                            *overflow = !total.add_scaled(count, weight);
                         }
                     }
-                    DpEvent::Overflow => *cap = (*cap).min(prefix + last_local),
+                    DpEvent::Overflow => *overflow = true,
                     DpEvent::Mask => {
-                        if on_event(DpEvent::Mask).is_break() {
+                        if on_event(CountEvent::Mask).is_break() {
                             *cancelled = true;
                         }
                     }
                 }
-                if *cancelled || prefix + last_local >= *cap {
+                if *cancelled || *overflow {
                     ControlFlow::Break(())
                 } else {
                     ControlFlow::Continue(())
