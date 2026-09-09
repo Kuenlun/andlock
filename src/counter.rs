@@ -40,23 +40,43 @@ fn binomial(n: usize, k: usize) -> u128 {
     result
 }
 
-/// Peak `u128`-slot footprint of a single popcount layer,
-/// `max_{1<=p<max_length} C(n,p) * p`.
-fn peak_layer_entries(n: usize, max_length: usize) -> u128 {
-    (1..max_length)
-        .map(|p| binomial(n, p).saturating_mul(p as u128))
-        .max()
-        .unwrap_or(0)
+/// A state fixes the visited set and endpoint, leaving at most `(p - 1)!`
+/// orderings. Only layers below `max_length` are stored. Above 34! the bound
+/// no longer fits u128, but checked per-length totals still bound every cell.
+const fn cell_bytes(p: usize) -> usize {
+    match p {
+        0..=6 => 1,
+        7..=9 => 2,
+        10..=13 => 4,
+        14..=21 => 8,
+        _ => 16,
+    }
 }
 
-/// Bytes [`count_patterns_dp`] allocates for `(n, max_length)`: two
-/// ping-pong layer buffers sized to the peak popcount-layer footprint.
+/// Each parity buffer holds only its own layers, with each layer using the
+/// narrowest cells that fit its per-state bound.
+fn layer_capacities(n: usize, max_length: usize) -> [u128; 2] {
+    let mut capacities = [0; 2];
+    for p in 1..max_length.min(n) {
+        let bytes = binomial(n, p)
+            .saturating_mul(p as u128)
+            .saturating_mul(cell_bytes(p) as u128);
+        let parity = (p - 1) % 2;
+        capacities[parity] = capacities[parity].max(bytes);
+    }
+    capacities
+}
+
+/// Bytes reserved for constrained DP layers.
+///
+/// Each parity buffer is sized to
+/// the largest byte footprint of the layers it stores. Unconstrained runs
+/// allocate nothing regardless of this estimate.
 /// Saturates to `u64::MAX` on overflow.
 #[must_use]
 pub fn dp_table_bytes(n: usize, max_length: usize) -> u64 {
-    let max_length = max_length.min(n);
-    let dp_bytes = peak_layer_entries(n, max_length).saturating_mul(32);
-    u64::try_from(dp_bytes).unwrap_or(u64::MAX)
+    let [odd, even] = layer_capacities(n, max_length);
+    u64::try_from(odd.saturating_add(even)).unwrap_or(u64::MAX)
 }
 
 /// Largest `max_length <= requested` whose [`dp_table_bytes`] fits within
@@ -87,8 +107,8 @@ pub fn effective_max_length(n: usize, requested: usize, budget_bytes: u64) -> us
 /// Working set [`count_patterns_dp`] needs to run. Allocation failure is
 /// hoisted into [`DpScratch::allocate`] so the DP body itself is infallible.
 pub struct DpScratch {
-    buf: Vec<u128>,
-    half: usize,
+    buf: Vec<u8>,
+    split: usize,
 }
 
 impl DpScratch {
@@ -104,27 +124,59 @@ impl DpScratch {
         blocks: &[M],
         max_length: usize,
     ) -> Result<Self, std::collections::TryReserveError> {
-        let half = if max_length < 2 || is_unconstrained(blocks) {
-            0
-        } else {
-            dp_layer_capacity(n, max_length)
-        };
-        let len = half.saturating_mul(2);
-        let mut buf: Vec<u128> = Vec::new();
-        buf.try_reserve_exact(len)?;
-        buf.resize(len, 0);
-        Ok(Self { buf, half })
+        if max_length < 2 || is_unconstrained(blocks) {
+            return Ok(Self {
+                buf: Vec::new(),
+                split: 0,
+            });
+        }
+        Self::allocate_constrained(n, max_length)
     }
 
-    fn split_mut(&mut self) -> (&mut [u128], &mut [u128]) {
-        self.buf.split_at_mut(self.half)
+    pub(crate) fn allocate_constrained(
+        n: usize,
+        max_length: usize,
+    ) -> Result<Self, std::collections::TryReserveError> {
+        let [odd, even] = layer_capacities(n, max_length);
+        let len = usize::try_from(odd.saturating_add(even)).unwrap_or(usize::MAX);
+        let split = usize::try_from(odd).unwrap_or(usize::MAX);
+        let mut buf = Vec::new();
+        buf.try_reserve_exact(len)?;
+        buf.resize(len, 0);
+        Ok(Self { buf, split })
+    }
+
+    fn split_mut(&mut self) -> (&mut [u8], &mut [u8]) {
+        self.buf.split_at_mut(self.split)
     }
 }
 
-/// Per-buffer entry count, saturating to `usize::MAX` so an overflowing layer
-/// surfaces as an alloc failure rather than a silently-truncated buffer.
-fn dp_layer_capacity(n: usize, l: usize) -> usize {
-    usize::try_from(peak_layer_entries(n, l)).unwrap_or(usize::MAX)
+fn read_cell<const BYTES: usize>(buf: &[u8], index: usize) -> u128 {
+    let offset = index * BYTES;
+    let mut bytes = [0; 16];
+    bytes[..BYTES].copy_from_slice(&buf[offset..offset + BYTES]);
+    u128::from_le_bytes(bytes)
+}
+
+fn add_cell<const BYTES: usize>(buf: &mut [u8], index: usize, ways: u128) {
+    let value = read_cell::<BYTES>(buf, index) + ways;
+    let offset = index * BYTES;
+    // The layer's factorial bound fits BYTES. For 16-byte cells the checked
+    // length total bounds the sum. Discarded high bytes are therefore zero.
+    buf[offset..offset + BYTES].copy_from_slice(&value.to_le_bytes()[..BYTES]);
+}
+
+type ReadCell = fn(&[u8], usize) -> u128;
+
+const fn cell_reader(bytes: usize) -> ReadCell {
+    match bytes {
+        1 => read_cell::<1>,
+        2 => read_cell::<2>,
+        4 => read_cell::<4>,
+        8 => read_cell::<8>,
+        16 => read_cell::<16>,
+        _ => unreachable!(),
+    }
 }
 
 /// Number of [`DpEvent::Mask`] events the constrained DP will fire,
@@ -174,7 +226,8 @@ static BINOM: [[usize; SLOTS]; SLOTS] = {
 ///
 /// Two popcount layers are alive at any time (source `p`, destination
 /// `p + 1`), carved out of `scratch` and ping-ponged in place. Each mask of
-/// popcount `p` packs `p` `u128` slots, one per valid endpoint. Layer-local
+/// popcount `p` packs `p` cells, one per valid endpoint. Cell widths grow
+/// from 1 to 16 bytes with the per-state bound `(p - 1)!`. Layer-local
 /// indices are reconstructed via colex-rank prefix/suffix sums instead of a
 /// `2^n` lookup table.
 ///
@@ -184,28 +237,42 @@ static BINOM: [[usize; SLOTS]; SLOTS] = {
 /// # Panics
 /// `n > M::MAX_POINTS`, `blocks.len() != n * n`, `max_length > n`, or
 /// `scratch` sized for a different `(n, max_length)` than requested.
-#[allow(clippy::too_many_lines)]
 pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     scratch: &mut DpScratch,
     n: usize,
     blocks: &[M],
     max_length: usize,
-    mut on_event: F,
+    on_event: F,
 ) {
     assert!(
         n <= M::MAX_POINTS,
         "N={n} exceeds the maximum of {}",
         M::MAX_POINTS
     );
+    count_patterns_seeded(scratch, n, blocks, max_length, M::low_bits(n), on_event);
+}
+
+/// Counts paths whose first node belongs to `starts`. Singleton weights are
+/// either zero or one, preserving the same factorial bound as the full DP.
+#[allow(clippy::too_many_lines)]
+pub(crate) fn count_patterns_seeded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
+    scratch: &mut DpScratch,
+    n: usize,
+    blocks: &[M],
+    max_length: usize,
+    starts: M,
+    mut on_event: F,
+) {
+    assert!(n <= M::MAX_POINTS, "too many nodes for mask width");
+    assert!(starts & M::low_bits(n) == starts, "start node outside grid");
     assert_eq!(blocks.len(), n * n, "blocks matrix must be n × n");
     assert!(
         max_length <= n,
         "max_length={max_length} must not exceed n={n}"
     );
 
-    // Closed-form fast path: with every move legal, counts[k] is the falling
-    // factorial P(n, k) = n * (n-1) * ... * (n-k+1). Stream each length as it
-    // is computed, bailing with Overflow the first time the product wraps u128.
+    // With every move legal, counts[k] = |starts| * P(n - 1, k - 1).
+    // Stream each exact length, stopping before the first product overflow.
     if is_unconstrained(blocks) {
         if on_event(DpEvent::LengthDone {
             length: 0,
@@ -215,9 +282,10 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
         {
             return;
         }
-        let mut perm: u128 = 1;
+        let mut perm = u128::from(starts.count_ones());
         for k in 1..=max_length {
-            let Some(next) = perm.checked_mul((n - k + 1) as u128) else {
+            let factor = if k == 1 { 1 } else { n - k + 1 };
+            let Some(next) = perm.checked_mul(factor as u128) else {
                 let _ = on_event(DpEvent::Overflow);
                 return;
             };
@@ -248,7 +316,7 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
 
     if on_event(DpEvent::LengthDone {
         length: 1,
-        count: n as u128,
+        count: u128::from(starts.count_ones()),
     })
     .is_break()
     {
@@ -259,41 +327,105 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     }
 
     assert_eq!(
-        scratch.half,
-        dp_layer_capacity(n, max_length),
+        [
+            scratch.split as u128,
+            (scratch.buf.len() - scratch.split) as u128
+        ],
+        layer_capacities(n, max_length),
         "scratch sized for a different (n, max_length) run"
     );
     let (mut dp_curr, mut dp_next) = scratch.split_mut();
 
-    let full_mask: M = M::low_bits(n);
+    // Every allowed singleton has one ordering. Reset all slots for reuse.
+    for (index, cell) in dp_curr[..n].iter_mut().enumerate() {
+        *cell = u8::from(starts & M::bit(index) != M::ZERO);
+    }
 
-    // Popcount-1 layer: each of the n masks has exactly one endpoint, one way.
-    dp_curr[..n].fill(1);
-
-    let mut prefix_sum = [0usize; SLOTS];
-    let mut suffix_sum = [0usize; SLOTS];
-    let mut bit_pos = [0u32; SLOTS];
-    // (next, dst_idx) per free bit, reused across masks.
-    let mut free_meta = [(0usize, 0usize); SLOTS];
-
-    let mut overflow = false;
-
-    // Ascend through popcount classes so every subset is final before it is
-    // read. Stops at max_length-1, the last layer that contributes to
-    // counts[max_length].
-    'outer: for p in 1..max_length {
+    for p in 1..max_length {
         let next_p = p + 1;
-        // At p == max_length-1 we still accumulate counts[max_length] but
-        // skip dp_next writes. Nothing would ever read them.
-        let need_dp_next = next_p < max_length;
-        let next_len = if need_dp_next {
-            usize::try_from(binomial(n, next_p).saturating_mul(next_p as u128))
-                .unwrap_or(usize::MAX)
+        let next_bytes = if next_p < max_length {
+            cell_bytes(next_p)
         } else {
             0
         };
+        let layer = Layer {
+            n,
+            p,
+            blocks,
+            current: dp_curr,
+            next: dp_next,
+        };
+        let read_current = cell_reader(cell_bytes(p));
+        let result = match next_bytes {
+            0 => layer.count::<0, _>(read_current, &mut on_event),
+            1 => layer.count::<1, _>(read_current, &mut on_event),
+            2 => layer.count::<2, _>(read_current, &mut on_event),
+            4 => layer.count::<4, _>(read_current, &mut on_event),
+            8 => layer.count::<8, _>(read_current, &mut on_event),
+            16 => layer.count::<16, _>(read_current, &mut on_event),
+            _ => unreachable!(),
+        };
+        match result {
+            Ok(count) => {
+                if on_event(DpEvent::LengthDone {
+                    length: next_p,
+                    count,
+                })
+                .is_break()
+                {
+                    return;
+                }
+            }
+            Err(LayerStop::Cancelled) => return,
+            Err(LayerStop::Overflow) => {
+                let _ = on_event(DpEvent::Overflow);
+                return;
+            }
+        }
+        std::mem::swap(&mut dp_curr, &mut dp_next);
+    }
+}
 
-        if need_dp_next {
+enum LayerStop {
+    Cancelled,
+    Overflow,
+}
+
+struct Layer<'a, M> {
+    n: usize,
+    p: usize,
+    blocks: &'a [M],
+    current: &'a [u8],
+    next: &'a mut [u8],
+}
+
+impl<M: Mask> Layer<'_, M> {
+    #[allow(clippy::too_many_lines)]
+    fn count<const NEXT_BYTES: usize, F: FnMut(DpEvent) -> ControlFlow<()>>(
+        self,
+        read_current: ReadCell,
+        on_event: &mut F,
+    ) -> Result<u128, LayerStop> {
+        let Self {
+            n,
+            p,
+            blocks,
+            current,
+            next: dp_next,
+        } = self;
+        let next_p = p + 1;
+        let full_mask = M::low_bits(n);
+        let mut prefix_sum = [0usize; SLOTS];
+        let mut suffix_sum = [0usize; SLOTS];
+        let mut bit_pos = [0u32; SLOTS];
+        let mut free_meta = [(0usize, 0usize); SLOTS];
+        if NEXT_BYTES != 0 {
+            let next_len = usize::try_from(
+                binomial(n, next_p)
+                    .saturating_mul(next_p as u128)
+                    .saturating_mul(NEXT_BYTES as u128),
+            )
+            .unwrap_or(usize::MAX);
             dp_next[..next_len].fill(0);
         }
 
@@ -303,11 +435,11 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
         let last: M = M::low_bits(p) << (n - p);
         loop {
             if on_event(DpEvent::Mask).is_break() {
-                break 'outer;
+                return Err(LayerStop::Cancelled);
             }
             let base_curr = idx_curr * p;
 
-            if need_dp_next {
+            if NEXT_BYTES != 0 {
                 // Cache mask bit positions and the colex-rank decomposition.
                 let mut tmp = mask;
                 let mut i = 0usize;
@@ -325,14 +457,14 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
                 }
             }
 
-            // Hoist per-`next` colex arithmetic out of the (end, next) loop.
+            // Hoist per-next colex arithmetic out of the endpoint loop.
             let mut nfree = 0usize;
             let mut free = !mask & full_mask;
             while free != M::ZERO {
                 let next_bit = free & free.wrapping_neg();
                 free ^= next_bit;
                 let next = next_bit.trailing_zeros() as usize;
-                let dst_idx = if need_dp_next {
+                let dst_idx = if NEXT_BYTES != 0 {
                     let next_off = (mask & next_bit.wrapping_sub_one()).count_ones() as usize;
                     let idx_new =
                         prefix_sum[next_off] + BINOM[next][next_off + 1] + suffix_sum[next_off];
@@ -351,49 +483,49 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
                 let end_bit = visited & visited.wrapping_neg();
                 visited ^= end_bit;
                 let end = end_bit.trailing_zeros() as usize;
-                let ways = dp_curr[base_curr + end_off];
+                let ways = read_current(current, base_curr + end_off);
                 end_off += 1;
                 if ways == 0 {
                     continue;
                 }
                 let row_start = end * n;
-                for &(next, dst_idx) in free_slice {
-                    let blockers = blocks[row_start + next];
-                    if mask & blockers == blockers {
-                        let Some(new_count) = count_next.checked_add(ways) else {
-                            overflow = true;
-                            break 'outer;
-                        };
-                        count_next = new_count;
-                        // Safe: dp_next[dst_idx] <= count_next by construction,
-                        // so if the checked add above succeeded so does this one.
-                        if need_dp_next {
-                            dp_next[dst_idx] += ways;
+                if NEXT_BYTES == 0 {
+                    // The final layer only needs the number of legal successors.
+                    let degree = free_slice
+                        .iter()
+                        .filter(|&&(next, _)| {
+                            let blockers = blocks[row_start + next];
+                            mask & blockers == blockers
+                        })
+                        .count();
+                    let contribution = ways
+                        .checked_mul(degree as u128)
+                        .ok_or(LayerStop::Overflow)?;
+                    count_next = count_next
+                        .checked_add(contribution)
+                        .ok_or(LayerStop::Overflow)?;
+                } else {
+                    for &(next, dst_idx) in free_slice {
+                        let blockers = blocks[row_start + next];
+                        if mask & blockers == blockers {
+                            count_next = count_next.checked_add(ways).ok_or(LayerStop::Overflow)?;
+                            // The checked total bounds each stored cell. Narrow
+                            // cells additionally fit the factorial layer bound.
+                            add_cell::<NEXT_BYTES>(dp_next, dst_idx, ways);
                         }
                     }
                 }
             }
-            idx_curr = idx_curr.wrapping_add(1);
+            idx_curr += 1;
             if mask == last {
                 break;
             }
             mask = mask.gosper_next();
         }
-
-        // count_next only takes contributions from popcount-p masks, so it
-        // is final once the layer is done.
-        if on_event(DpEvent::LengthDone {
-            length: next_p,
-            count: count_next,
-        })
-        .is_break()
-        {
-            break 'outer;
-        }
-        std::mem::swap(&mut dp_curr, &mut dp_next);
-    }
-
-    if overflow {
-        let _ = on_event(DpEvent::Overflow);
+        Ok(count_next)
     }
 }
+
+#[cfg(test)]
+#[cfg_attr(coverage_nightly, coverage(off))]
+mod tests;
