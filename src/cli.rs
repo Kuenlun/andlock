@@ -127,7 +127,8 @@ struct OutputArgs {
 
     /// Suppress progress, timing, and the grid preview.
     ///
-    /// Pattern counts are still printed to stdout.
+    /// Pattern counts are still printed to stdout. Warnings and errors
+    /// remain visible on stderr.
     #[arg(short, long, help_heading = "Output")]
     quiet: bool,
 
@@ -148,7 +149,8 @@ struct MemoryArgs {
     /// (1 KiB = 1024 B). When the run would allocate more, `--max-length`
     /// is clamped to the largest length that fits and a `warning:` line
     /// reports the equivalent `--max-length` value alongside the budget
-    /// shortfall.
+    /// shortfall. Partial results are printed and the process exits with
+    /// failure when the requested range cannot be completed.
     ///
     /// Defaults to ~80% of the OS-reported available RAM, sampled once at
     /// startup. The default guards against the DP silently growing into
@@ -258,7 +260,7 @@ fn run_grid(
     } = output;
 
     if export_json {
-        if !quiet && (range.min_length.is_some() || range.max_length.is_some()) {
+        if range.min_length.is_some() || range.max_length.is_some() {
             eprintln!("warning: --min-length and --max-length have no effect with --export-json");
         }
         println!("{}", grid_to_json(grid)?);
@@ -266,7 +268,7 @@ fn run_grid(
     }
 
     let (min_length, max_length) = resolve_range(&range, grid.node_count())?;
-    // The preview is decoration, like progress and warnings: it goes to
+    // The preview is decoration, like progress: it goes to
     // stderr so stdout carries nothing but the counts.
     if !quiet && let Some(preview) = render_for_terminal(grid) {
         eprintln!("{preview}");

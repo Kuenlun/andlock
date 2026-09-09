@@ -89,9 +89,9 @@ impl<'a> LengthPrinter<'a> {
         }
     }
 
-    /// Records a `(length, count)` row, filtered by the range and `count != 0`.
+    /// Records a finalised `(length, count)` row within the selected range.
     pub fn print(&mut self, length: usize, count: u128) {
-        if length < self.min_length || length > self.max_length || count == 0 {
+        if length < self.min_length || length > self.max_length {
             return;
         }
         self.entries.push((length, count));

@@ -101,6 +101,8 @@ A layered bitmask dynamic program walks visited-sets grouped by population count
 
 `0` success · `1` runtime error · `2` usage error · `130` interrupted (Ctrl+C prints the partial table first).
 
+An incomplete requested length range or a selected-range total that exceeds `u128` exits with `1`, preserving all finalised per-length counts. `--quiet` keeps warnings and errors visible.
+
 ## License
 
 Dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE) at your option. Any contribution intentionally submitted for inclusion in andlock, as defined in the Apache-2.0 license, shall be dual-licensed as above without any additional terms or conditions.
