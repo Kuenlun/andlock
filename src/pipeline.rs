@@ -6,6 +6,7 @@
 //! prints the final report. Dispatches the generic counter to its
 //! `u32` / `u64` / `u128` monomorphisation per run.
 
+use std::collections::TryReserveError;
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
@@ -13,11 +14,10 @@ use anyhow::{Result, anyhow};
 use console::style;
 use indicatif::{HumanBytes, MultiProgress, ProgressBar, ProgressStyle};
 
-use andlock::counter::{
-    DpEvent, DpScratch, count_patterns_dp, dp_mask_ticks, dp_table_bytes, is_unconstrained,
-};
+use andlock::counter::{DpEvent, dp_mask_ticks, dp_table_bytes, is_unconstrained};
 use andlock::grid::{GridDefinition, compute_blocks};
 use andlock::mask::{self, Mask, Width};
+use andlock::search::{count_patterns_bounded, count_plan};
 
 use crate::memory::resolve_memory_budget;
 use crate::output::{
@@ -71,7 +71,7 @@ pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
         Some(Width::U64) => run_dp_sequence::<u64>(grid, n, opts, mp),
         Some(Width::U128) => run_dp_sequence::<u128>(grid, n, opts, mp),
         None => panic!("n={n} past mask::MAX_POINTS, validate first"),
-    }?;
+    };
 
     print_report(&outcome, grid, opts)?;
     print_footer(&outcome, opts);
@@ -89,10 +89,16 @@ struct DpRunOutcome {
     last_completed: Option<usize>,
     /// Sum across finalised selected lengths. `None` when the sum overflowed.
     total: Option<u128>,
+    allocation_error: Option<TryReserveError>,
 }
 
 impl DpRunOutcome {
     fn ensure_complete(&self, min_length: usize, max_length: usize) -> Result<()> {
+        if let Some(error) = &self.allocation_error {
+            return Err(anyhow!(
+                "could not allocate counting tables: {error}; lower --memory-limit to use smaller tables"
+            ));
+        }
         if self.last_completed != Some(max_length) {
             return Err(anyhow!(
                 "requested length range {min_length}..={max_length} is incomplete"
@@ -112,7 +118,7 @@ fn run_dp_sequence<M: Mask>(
     n: usize,
     opts: RunOptions,
     mp: &MultiProgress,
-) -> Result<DpRunOutcome> {
+) -> DpRunOutcome {
     let RunOptions {
         min_length,
         max_length,
@@ -128,29 +134,35 @@ fn run_dp_sequence<M: Mask>(
         pb.finish_and_clear();
     }
 
-    // All-zero blocks take the closed-form path that allocates no DP buffer,
-    // so the memory clamp must not truncate it (`andlock 0 -f 31` would
-    // otherwise be capped against a 143 GiB phantom estimate).
-    let (effective, clamp) =
-        resolve_memory_budget(n, max_length, memory_limit, is_unconstrained(&blocks));
-
-    if let Some((needed, budget)) = clamp {
-        print_clamp_warning(effective, needed, budget);
-    }
-
-    let mem_str = HumanBytes(dp_table_bytes(n, effective)).to_string();
-    let count_pb = build_dp_bar(mp, n, effective, &mem_str, quiet);
-    let mut printer = LengthPrinter::new(mp, min_length, effective, human, count_pb.as_ref());
+    let budget = resolve_memory_budget(memory_limit);
+    let unconstrained = is_unconstrained(&blocks);
+    let partitioned = !unconstrained && dp_table_bytes(n, max_length) > budget;
+    let peak = if unconstrained {
+        0
+    } else if partitioned {
+        (0..=max_length)
+            .map(|length| count_plan(n, length, budget).table_bytes)
+            .max()
+            .unwrap_or(0)
+    } else {
+        dp_table_bytes(n, max_length)
+    };
+    let mem_str = HumanBytes(peak).to_string();
+    let count_pb = build_dp_bar(mp, n, max_length, &mem_str, quiet, partitioned);
+    let mut printer = LengthPrinter::new(mp, min_length, max_length, human, count_pb.as_ref());
 
     let t1 = Instant::now();
-    let (last_completed, overflow) = drive_dp::<M>(
-        n,
+    let progress = drive_dp::<M>(
+        grid,
         &blocks,
-        effective,
+        max_length,
+        budget,
         &mem_str,
         count_pb.as_ref(),
         &mut printer,
-    )?;
+    );
+    let last_completed = progress.last_completed;
+    let overflow = progress.overflow;
     let elapsed = t1.elapsed();
     let cancelled = tty::is_cancelled();
 
@@ -169,33 +181,24 @@ fn run_dp_sequence<M: Mask>(
         .try_fold(0u128, |acc, &(_, c)| acc.checked_add(c));
     let status = if cancelled {
         RunStatus::Interrupted
+    } else if progress.allocation_error.is_some() {
+        RunStatus::AllocationFailed
     } else if overflow {
         RunStatus::CountOverflow
-    } else if clamp.is_some() {
-        RunStatus::MemoryLimit
     } else if total.is_none() {
         RunStatus::TotalOverflow
     } else {
         RunStatus::Complete
     };
 
-    Ok(DpRunOutcome {
+    DpRunOutcome {
         entries,
         elapsed,
         status,
         last_completed,
         total,
-    })
-}
-
-fn print_clamp_warning(effective: usize, needed: u64, budget: u64) {
-    let warn = style("warning:").yellow().bold();
-    eprintln!(
-        "{warn} insufficient memory, run limited to --max-length {effective} \
-         (need {}, only {} available)",
-        HumanBytes(needed),
-        HumanBytes(budget),
-    );
+        allocation_error: progress.allocation_error,
+    }
 }
 
 fn print_overflow_warning(last_exact: usize) {
@@ -235,13 +238,22 @@ fn build_dp_bar(
     effective: usize,
     mem_str: &str,
     quiet: bool,
+    partitioned: bool,
 ) -> Option<ProgressBar> {
     let dp_ticks = dp_mask_ticks(n, effective);
     if quiet || dp_ticks == 0 {
         return None;
     }
-    let pb = mp.add(ProgressBar::new(dp_ticks));
-    pb.set_style(bar_style());
+    let pb = mp.add(if partitioned {
+        ProgressBar::new_spinner()
+    } else {
+        ProgressBar::new(dp_ticks)
+    });
+    pb.set_style(if partitioned {
+        spinner_style()
+    } else {
+        bar_style()
+    });
     pb.set_prefix("Counting");
     pb.set_message(dp_progress_message(1, effective, n, mem_str));
     pb.enable_steady_tick(Duration::from_millis(80));
@@ -256,34 +268,35 @@ fn dp_progress_message(current: usize, effective: usize, n: usize, mem_str: &str
 /// DP can fire billions of mask events per run.
 const TICK_BATCH: u64 = 1024;
 
+struct CountProgress {
+    last_completed: Option<usize>,
+    overflow: bool,
+    allocation_error: Option<TryReserveError>,
+}
+
 /// Drives the DP, forwarding each `LengthDone` to the printer and updating the
 /// progress bar in lockstep. The closure breaks on SIGINT so the DP can yield
 /// its partial state. Returns the last finalised length and whether the next
 /// count overflowed `u128`.
 fn drive_dp<M: Mask>(
-    n: usize,
+    grid: &GridDefinition,
     blocks: &[M],
     effective: usize,
+    budget: u64,
     mem_str: &str,
     count_pb: Option<&ProgressBar>,
     printer: &mut LengthPrinter<'_>,
-) -> Result<(Option<usize>, bool)> {
-    let mut scratch = DpScratch::allocate::<M>(n, blocks, effective).map_err(|e| {
-        anyhow!(
-            "could not allocate ~{mem_str} of RAM for the DP buffers: {e}. \
-             Lower --max-length or pass --memory-limit to clamp the run to a smaller cap."
-        )
-    })?;
-
+) -> CountProgress {
+    let n = grid.node_count();
     let mut last_emitted: Option<usize> = None;
     let mut overflow = false;
     let mut ticks: u64 = 0;
     let mut flushed: u64 = 0;
 
-    count_patterns_dp(&mut scratch, n, blocks, effective, |event| {
+    let allocation_error = count_patterns_bounded(grid, blocks, effective, budget, |event| {
         match event {
             DpEvent::Mask => {
-                ticks += 1;
+                ticks = ticks.saturating_add(1);
                 if ticks - flushed >= TICK_BATCH
                     && let Some(pb) = count_pb
                 {
@@ -310,9 +323,14 @@ fn drive_dp<M: Mask>(
         } else {
             ControlFlow::Continue(())
         }
-    });
+    })
+    .err();
 
-    Ok((last_emitted, overflow))
+    CountProgress {
+        last_completed: last_emitted,
+        overflow,
+        allocation_error,
+    }
 }
 
 /// Prints a JSON report or the per-length table and `Total`/`Points` summary.
@@ -382,7 +400,8 @@ fn print_footer(outcome: &DpRunOutcome, opts: RunOptions) {
             Some(last) if last < opts.max_length => {
                 eprintln!("  Counted up to length {last} in {elapsed:.2?}");
             }
-            _ => eprintln!("  Counted in {elapsed:.2?}"),
+            Some(_) => eprintln!("  Counted in {elapsed:.2?}"),
+            None => {}
         }
     }
 }
@@ -397,14 +416,16 @@ mod tests {
         let mut printer = LengthPrinter::new(&mp, 2, 2, false, None);
         // Each move requires its unvisited destination, so length 2 has no patterns.
         let blocks = [0u32, 2, 1, 0];
-        let (last_completed, overflow) = drive_dp(2, &blocks, 2, "64 B", None, &mut printer)?;
-        assert!(!overflow);
+        let grid = andlock::grid::build_grid_definition(&[2], 0).map_err(anyhow::Error::msg)?;
+        let progress = drive_dp(&grid, &blocks, 2, 64, "64 B", None, &mut printer);
+        assert!(!progress.overflow);
         let outcome = DpRunOutcome {
             entries: printer.finish(),
             elapsed: Duration::ZERO,
             status: RunStatus::Complete,
-            last_completed,
+            last_completed: progress.last_completed,
             total: Some(0),
+            allocation_error: progress.allocation_error,
         };
         assert_eq!(outcome.entries, [(2, 0)]);
         outcome.ensure_complete(2, 2)

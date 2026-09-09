@@ -65,7 +65,7 @@ Counts go to stdout; the preview, progress, and warnings go to stderr, so pipes 
 
 `andlock 3x3 --min-length 4 --json` emits one count report containing `grid`, `requested_range`, `completed_range`, `counts`, `total`, and `status`. Counts and totals are decimal strings, preserving full `u128` precision. Each count has `length` and `count` fields. Ranges have inclusive `min_length` and `max_length` fields.
 
-Status is `complete`, `interrupted`, `count_overflow`, `total_overflow`, or `memory_limit`. Partial reports retain finalized counts and their subtotal. `completed_range` and `total` are `null` when no selected length finished. A total that overflows is also `null`. `--json` cannot be combined with `--human` or `--export-json`, which exports only the reusable grid definition.
+Status is `complete`, `interrupted`, `count_overflow`, `total_overflow`, or `allocation_failed`. Partial reports retain finalized counts and their subtotal. `completed_range` and `total` are `null` when no selected length finished. A total that overflows is also `null`. `--json` cannot be combined with `--human` or `--export-json`, which exports only the reusable grid definition.
 
 ## The rule
 
@@ -93,13 +93,13 @@ The empty pattern and any single node count as valid by convention.
 
 ## Cost
 
-Without the visibility rule the count over N nodes would be exactly `floor(e · N!)`. The rule prunes that set, but the result still grows like `O(N!)`. Past 6x6 you will want `--max-length` and `--memory-limit` to keep runs bounded; by default andlock caps its tables at 80 % of available RAM and reports the largest `--max-length` that fits.
+Without the visibility rule the count over N nodes would be exactly `floor(e · N!)`. The rule prunes that set, but the result still grows like `O(N!)`. Use `--max-length` to limit work and `--memory-limit` to cap counting-table storage. The default budget is 80% of available RAM (512 MiB if detection fails). When complete layers do not fit, andlock partitions valid prefixes and reuses smaller tables, preserving the requested length range. A zero budget uses traversal without counting tables. Input and result storage are additional; runtime can still grow exponentially.
 
 Every count is exact: arithmetic runs in `u128` with overflow detection, and a run stops at the last length that fits rather than ever printing a wrapped value.
 
 ## How it counts
 
-A layered bitmask dynamic program walks visited-sets grouped by population count: Gosper's hack enumerates each layer and colex ranking addresses states inside the two live layers, so memory tracks the largest binomial layers instead of a `2^N` table. The visited mask monomorphises to `u32`/`u64`/`u128`, whichever is the narrowest fit for the grid.
+A layered bitmask dynamic program walks visited-sets grouped by population count: Gosper's hack enumerates each layer and colex ranking addresses states inside the two live layers, so memory tracks the largest binomial layers instead of a `2^N` table. Each layer uses the smallest integer width justified by its maximum number of orderings. Prefix partitions reduce memory further, and node symmetries are verified against the movement rules before equivalent starting points are grouped. Completed lengths remain available on interruption. The visited mask monomorphises to `u32`/`u64`/`u128`, whichever is the narrowest fit for the grid.
 
 ## Exit codes
 

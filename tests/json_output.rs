@@ -76,32 +76,22 @@ fn quiet_changes_only_diagnostics_for_successful_json_counts() -> Result<()> {
 }
 
 #[test]
-fn memory_limited_reports_distinguish_partial_and_unstarted_ranges() -> Result<()> {
+fn zero_table_budget_preserves_complete_json_reports() -> Result<()> {
     for minimum in ["0", "2"] {
+        let (reference, expected) = run(&[
+            "3x3",
+            "--min-length",
+            minimum,
+            "--memory-limit",
+            "1MiB",
+            "-q",
+        ])?;
         let (output, report) = run(&["3x3", "--min-length", minimum, "--memory-limit", "0", "-q"])?;
-        assert_eq!(output.status.code(), Some(1));
-        assert_eq!(report["status"], "memory_limit");
-        assert_eq!(
-            report["requested_range"]["min_length"],
-            minimum.parse::<usize>()?
-        );
-        assert_eq!(report["requested_range"]["max_length"], 9);
-        if minimum == "0" {
-            assert_eq!(
-                report["completed_range"],
-                json!({"min_length": 0, "max_length": 1})
-            );
-            assert_eq!(
-                report["counts"],
-                json!([{"length": 0, "count": "1"}, {"length": 1, "count": "9"}])
-            );
-            assert_eq!(report["total"], "10");
-        } else {
-            assert!(report["completed_range"].is_null());
-            assert_eq!(report["counts"], json!([]));
-            assert!(report["total"].is_null());
-        }
-        assert!(std::str::from_utf8(&output.stderr)?.contains("insufficient memory"));
+        assert!(reference.status.success() && output.status.success());
+        assert_eq!(report, expected);
+        assert_eq!(report["status"], "complete");
+        assert_eq!(report["completed_range"]["max_length"], 9);
+        assert!(output.stderr.is_empty());
     }
     Ok(())
 }
@@ -186,12 +176,33 @@ fn json_rejects_incompatible_output_modes() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn allocation_failure_still_produces_a_structured_report() -> Result<()> {
+    let output = Command::new(env!("CARGO_BIN_EXE_andlock"))
+        .args([
+            "127",
+            "--memory-limit",
+            "18446744073709551615",
+            "--json",
+            "-q",
+        ])
+        .output()?;
+    assert_eq!(output.status.code(), Some(1));
+    let report: Value = serde_json::from_slice(&output.stdout)?;
+    assert_eq!(report["status"], "allocation_failed");
+    assert_eq!(report["counts"], json!([]));
+    assert!(report["completed_range"].is_null());
+    assert!(report["total"].is_null());
+    assert!(std::str::from_utf8(&output.stderr)?.contains("could not allocate counting tables"));
+    Ok(())
+}
+
 #[cfg(unix)]
 #[test]
 fn interrupted_json_keeps_finalized_counts_and_sigint_exit() -> Result<()> {
     use std::io::{BufRead, BufReader, Read};
 
-    for minimum in ["0", "5"] {
+    for minimum in ["0", "127"] {
         let mut child = Command::new(env!("CARGO_BIN_EXE_andlock"))
             .args([
                 "4x4",
@@ -202,15 +213,14 @@ fn interrupted_json_keeps_finalized_counts_and_sigint_exit() -> Result<()> {
                 "--min-length",
                 minimum,
                 "--json",
-                "-q",
             ])
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
         let mut stderr = BufReader::new(child.stderr.take().context("child stderr")?);
         let mut diagnostics = String::new();
-        // This warning is emitted after handler installation and before the DP starts.
-        while !diagnostics.contains("insufficient memory") {
+        // The preview is emitted after handler installation and before counting starts.
+        while !diagnostics.contains("●") {
             assert!(stderr.read_line(&mut diagnostics)? > 0, "{diagnostics}");
         }
         let signal = Command::new("kill")

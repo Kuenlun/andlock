@@ -154,18 +154,14 @@ struct OutputArgs {
 
 #[derive(Args, Copy, Clone)]
 struct MemoryArgs {
-    /// Cap peak RAM allocation (e.g. 512M, 2GiB).
+    /// Cap counting-table memory (e.g. 512M, 2GiB).
     ///
-    /// Accepts plain bytes ("1024") or values with K/M/G/T binary suffixes
-    /// (1 KiB = 1024 B). When the run would allocate more, `--max-length`
-    /// is clamped to the largest length that fits and a `warning:` line
-    /// reports the equivalent `--max-length` value alongside the budget
-    /// shortfall. Partial results are printed and the process exits with
-    /// failure when the requested range cannot be completed.
+    /// Accepts bytes or binary K/M/G/T suffixes. If complete layers do not
+    /// fit, count smaller prefix partitions without shortening the requested
+    /// range. Smaller budgets can require substantially more time; zero uses
+    /// traversal without counting tables. Input and output storage are extra.
     ///
-    /// Defaults to ~80% of the OS-reported available RAM, sampled once at
-    /// startup. The default guards against the DP silently growing into
-    /// swap.
+    /// Defaults to 80% of available RAM, or 512 MiB if detection is unavailable.
     #[arg(
         long,
         value_name = "SIZE",

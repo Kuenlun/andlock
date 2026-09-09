@@ -21,9 +21,9 @@ const POINTS_LABEL: &str = "Points";
 pub enum RunStatus {
     Complete,
     Interrupted,
+    AllocationFailed,
     CountOverflow,
     TotalOverflow,
-    MemoryLimit,
 }
 
 #[derive(Copy, Clone, Serialize)]
