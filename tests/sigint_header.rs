@@ -2,39 +2,9 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
-//! Drives `andlock 4x4 -f 100 --human` under a PTY, sends Ctrl+C while the DP
-//! is still running, and asserts the output carries: the memory clamp warning,
-//! a single `Len  Count` table whose rows sum to the printed `Total`, a
-//! `Points` line, and an `Interrupted at length N` footer pointing at the
-//! last completed length.
-//!
-//! Two views are inspected. The raw byte stream is used for content that the
-//! binary emits once and never rewrites (the clamp warning, the interrupted
-//! footer), so transient cursor games during SIGINT cleanup cannot hide it.
-//! The vt100-rendered screen is used for the table, separator and summary,
-//! where deduplicating the live multi-line bar against the final report
-//! requires a real terminal model.
-//!
-//! Shape of the rendered output this test inspects:
-//!
-//! ```text
-//! ● ● ● ●    ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★
-//! ● ● ● ●    ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★
-//! ● ● ● ●    ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★
-//! ● ● ● ●    ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★ ★
-//!
-//! warning: insufficient memory, run limited to --max-length 5 (need 16.00 EiB, only 5.16 GiB available)
-//!   Len        Count
-//!     0            1
-//!     1          116
-//!     2        13272
-//!     3      1505544
-//!     4    169290680
-//!   ──────────────────
-//!   Total  170809613
-//!   Points       116
-//!   Interrupted at length 4 after 7.28s
-//! ```
+//! Interrupt a running count through a PTY and check its final rendered report.
+//! The terminal model must contain one table, a correct subtotal and a matching
+//! interruption footer after the live progress display is cleared.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::unwrap_used)]
@@ -68,7 +38,18 @@ fn sigint_renders_coherent_partial_report() {
         .expect("open pty");
 
     let mut cmd = CommandBuilder::new(env!("CARGO_BIN_EXE_andlock"));
-    cmd.args(["4x4", "-f", "100", "--human"]);
+    cmd.env("TERM", "xterm-256color");
+    cmd.env_remove("NO_COLOR");
+    cmd.args([
+        "4x4",
+        "-f",
+        "100",
+        "--human",
+        "--max-length",
+        "8",
+        "--memory-limit",
+        "32MiB",
+    ]);
 
     let mut child = pty.slave.spawn_command(cmd).expect("spawn child");
     drop(pty.slave);
@@ -132,27 +113,7 @@ fn sigint_renders_coherent_partial_report() {
 }
 
 fn assert_report(raw: &str, screen: &str) {
-    // 1. Memory clamp warning. Emitted once via eprintln before any bars draw;
-    //    look for it in the raw stream so cursor movements in the SIGINT
-    //    cleanup path cannot scrub it from the visible screen. `warning:` is
-    //    styled separately by `console`, so its trailing ANSI reset splits it
-    //    from the rest of the sentence: each needle has to be checked as its
-    //    own contiguous run of bytes.
-    for needle in [
-        "warning:",
-        "insufficient memory",
-        "run limited to --max-length",
-        "(need ",
-        " available)",
-    ] {
-        assert!(
-            raw.contains(needle),
-            "clamp warning lacks {needle:?} in raw stream:\n{raw}",
-        );
-    }
-
-    // 2. Exactly one `Len  Count` header in the rendered screen. The live bar
-    //    redraws the header in place; vt100 collapses them back to one.
+    // The terminal model collapses redraws into one final table.
     let headers = screen
         .lines()
         .filter(|l| {
@@ -162,14 +123,14 @@ fn assert_report(raw: &str, screen: &str) {
         .count();
     assert_eq!(headers, 1, "expected one `Len  Count` header in:\n{screen}");
 
-    // 3. Contiguous data rows starting at length 0.
+    // Contiguous data rows starting at length 0.
     let rows = data_rows(screen);
     assert!(!rows.is_empty(), "no data rows in:\n{screen}");
     for (i, &(len, _)) in rows.iter().enumerate() {
         assert_eq!(len, i, "lengths not contiguous from 0: {rows:?}");
     }
 
-    // 4. `Total` value equals the sum of the printed rows. We only take the
+    // `Total` value equals the sum of the printed rows. We only take the
     //    first token after the label, since the SIGINT cleanup path may leave
     //    stale progress-bar text further right on this row.
     let total = screen
@@ -185,14 +146,14 @@ fn assert_report(raw: &str, screen: &str) {
     let expected: u128 = rows.iter().map(|&(_, c)| c).sum();
     assert_eq!(total, expected, "Total {total} != sum of rows {expected}");
 
-    // 5. `Points` row present.
+    // `Points` row present.
     assert!(
         screen.lines().any(|l| l.trim_start().starts_with("Points")),
         "missing `Points` row in:\n{screen}",
     );
 
-    // 6. `Interrupted at length N after T` footer matches the last row. Match
-    //    on the raw stream for the same reason as the warning.
+    // `Interrupted at length N after T` footer matches the last row. Match
+    //    on the raw stream so cursor movement cannot hide the footer.
     let last = rows.last().expect("rows is non-empty").0;
     let footer = format!("Interrupted at length {last} after ");
     assert!(
