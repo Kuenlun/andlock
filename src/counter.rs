@@ -349,7 +349,6 @@ pub(crate) fn count_patterns_seeded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()
     count_patterns_with_visits(scratch, n, blocks, max_length, starts, None, on_event);
 }
 
-#[allow(clippy::too_many_lines)]
 fn count_patterns_with_visits<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     scratch: &mut DpScratch,
     n: usize,
@@ -478,8 +477,31 @@ struct Layer<'a, M> {
     next: &'a mut [u8],
 }
 
+/// Cache bit positions and the prefix/suffix sums used to rank a successor mask.
+#[inline]
+fn colex_sums<M: Mask>(
+    mask: M,
+    bit_pos: &mut [u32; SLOTS],
+    prefix_sum: &mut [usize; SLOTS],
+    suffix_sum: &mut [usize; SLOTS],
+) {
+    let mut tmp = mask;
+    let mut i = 0usize;
+    while tmp != M::ZERO {
+        let bit = tmp & tmp.wrapping_neg();
+        let pos = bit.trailing_zeros();
+        bit_pos[i] = pos;
+        prefix_sum[i + 1] = prefix_sum[i] + BINOM[pos as usize][i + 1];
+        tmp ^= bit;
+        i += 1;
+    }
+    suffix_sum[i] = 0;
+    for j in (0..i).rev() {
+        suffix_sum[j] = suffix_sum[j + 1] + BINOM[bit_pos[j] as usize][j + 2];
+    }
+}
+
 impl<M: Mask> Layer<'_, M> {
-    #[allow(clippy::too_many_lines)]
     fn count<const NEXT_BYTES: usize, F: FnMut(DpEvent) -> ControlFlow<()>>(
         self,
         read_current: ReadCell,
@@ -519,21 +541,7 @@ impl<M: Mask> Layer<'_, M> {
             let base_curr = idx_curr * p;
 
             if NEXT_BYTES != 0 {
-                // Cache mask bit positions and the colex-rank decomposition.
-                let mut tmp = mask;
-                let mut i = 0usize;
-                while tmp != M::ZERO {
-                    let bit = tmp & tmp.wrapping_neg();
-                    let pos = bit.trailing_zeros();
-                    bit_pos[i] = pos;
-                    prefix_sum[i + 1] = prefix_sum[i] + BINOM[pos as usize][i + 1];
-                    tmp ^= bit;
-                    i += 1;
-                }
-                suffix_sum[p] = 0;
-                for j in (0..p).rev() {
-                    suffix_sum[j] = suffix_sum[j + 1] + BINOM[bit_pos[j] as usize][j + 2];
-                }
+                colex_sums(mask, &mut bit_pos, &mut prefix_sum, &mut suffix_sum);
             }
 
             // Hoist per-next colex arithmetic out of the endpoint loop.
