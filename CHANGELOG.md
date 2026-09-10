@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0](https://github.com/Kuenlun/andlock/compare/v0.4.0...v0.5.0) - 2026-09-10
+
+### Added
+
+- Add `--json` count reports with requested and completed length ranges, completion status, and exact counts and totals encoded as decimal strings ([#86](https://github.com/Kuenlun/andlock/pull/86)).
+- Add `--big-counts` for arbitrary-precision counts and totals while retaining compact, fixed-width counting tables ([#90](https://github.com/Kuenlun/andlock/pull/90)).
+- Add `--visits <PATH>` to restrict each visit to allowed node indices loaded from JSON, including stdin; shorter patterns use the corresponding prefix of the filters ([#91](https://github.com/Kuenlun/andlock/pull/91)).
+
+### Changed
+
+- Preserve the requested length range when counting tables exceed `--memory-limit` by partitioning valid prefixes and reusing smaller tables; verified symmetries avoid recounting equivalent starting points, and a zero budget uses traversal without counting tables ([#88](https://github.com/Kuenlun/andlock/pull/88)).
+- Reduce counting-table memory with the smallest safe integer width per layer and avoid storing the final layer when its counts can be computed directly ([#84](https://github.com/Kuenlun/andlock/pull/84)).
+- Use a 512 MiB table budget when available RAM cannot be detected; the usual default remains 80% of available RAM, with input and result storage outside this budget ([#88](https://github.com/Kuenlun/andlock/pull/88)).
+
+### Fixed
+
+- Return a failure exit status for incomplete runs or totals that overflow, preserving finalized counts and keeping essential diagnostics visible with `--quiet` ([#83](https://github.com/Kuenlun/andlock/pull/83)).
+- Print completed lengths with zero valid patterns instead of omitting their rows ([#83](https://github.com/Kuenlun/andlock/pull/83)).
+- Prevent a panic when previewing a valid zero-dimensional point ([#89](https://github.com/Kuenlun/andlock/pull/89)).
+
+### Security
+
+- Update the locked `anyhow` and `crossbeam-epoch` dependencies to resolve security advisories ([#82](https://github.com/Kuenlun/andlock/pull/82)).
+
 ## [0.4.0](https://github.com/Kuenlun/andlock/compare/v0.3.0...v0.4.0) - 2026-06-12
 
 ### Added
