@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::grid::{GridDefinition, build_grid_definition, compute_blocks};
+use crate::visits::VisitFilters;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -30,6 +31,15 @@ fn inside_segment(origin: &[i32], target: &[i32], probe: &[i32]) -> bool {
 
 /// Enumerates ordered paths directly, without bitmasks, subset ranks, or DP.
 fn enumerate(grid: &GridDefinition, max_length: usize, starts: u128) -> Vec<u128> {
+    enumerate_with_filters(grid, max_length, starts, None)
+}
+
+fn enumerate_with_filters(
+    grid: &GridDefinition,
+    max_length: usize,
+    starts: u128,
+    allowed: Option<&[Vec<usize>]>,
+) -> Vec<u128> {
     let n = grid.node_count();
     let mut blockers = vec![Vec::new(); n * n];
     for (a, origin) in grid.points.iter().enumerate() {
@@ -48,9 +58,9 @@ fn enumerate(grid: &GridDefinition, max_length: usize, starts: u128) -> Vec<u128
     }
     let mut visited = vec![false; n];
     for start in 0..n {
-        if starts & (1 << start) != 0 {
+        if starts & (1 << start) != 0 && allowed.is_none_or(|visits| visits[0].contains(&start)) {
             visited[start] = true;
-            enumerate_from(&blockers, &mut visited, start, 1, &mut counts);
+            enumerate_from(&blockers, &mut visited, start, 1, &mut counts, allowed);
             visited[start] = false;
         }
     }
@@ -63,6 +73,7 @@ fn enumerate_from(
     end: usize,
     length: usize,
     counts: &mut [u128],
+    allowed: Option<&[Vec<usize>]>,
 ) {
     counts[length] += 1;
     if length + 1 == counts.len() {
@@ -70,9 +81,12 @@ fn enumerate_from(
     }
     let n = visited.len();
     for next in 0..n {
-        if !visited[next] && blockers[end * n + next].iter().all(|&node| visited[node]) {
+        if !visited[next]
+            && allowed.is_none_or(|visits| visits[length].contains(&next))
+            && blockers[end * n + next].iter().all(|&node| visited[node])
+        {
             visited[next] = true;
-            enumerate_from(blockers, visited, next, length + 1, counts);
+            enumerate_from(blockers, visited, next, length + 1, counts, allowed);
             visited[next] = false;
         }
     }
@@ -361,6 +375,7 @@ fn layer_overflow_checks_sum_and_final_degree_product() {
             n: 3,
             p: 1,
             blocks: &blocks,
+            allowed: u32::low_bits(3),
             current: &[],
             next: &mut next,
         };
@@ -409,6 +424,7 @@ fn check_layer_ranks<const BYTES: usize>(unit: u128) {
             n,
             p,
             blocks: &blocks,
+            allowed: u32::low_bits(n),
             current: &current,
             next: &mut next,
         }
@@ -427,4 +443,201 @@ fn every_cell_width_uses_correct_destination_ranks() {
     check_layer_ranks::<4>(1 << 16);
     check_layer_ranks::<8>(1 << 32);
     check_layer_ranks::<16>(1 << 80);
+}
+
+fn collect_filtered<M: Mask>(
+    scratch: &mut DpScratch,
+    n: usize,
+    blocks: &[M],
+    max_length: usize,
+    allowed: &[M],
+) -> Vec<u128> {
+    let mut counts = Vec::new();
+    count_patterns_filtered(scratch, n, blocks, max_length, allowed, |event| {
+        match event {
+            DpEvent::LengthDone { length, count } => {
+                assert_eq!(length, counts.len());
+                counts.push(count);
+            }
+            DpEvent::Overflow => panic!("unexpected filtered overflow"),
+            DpEvent::Mask => {}
+        }
+        ControlFlow::Continue(())
+    });
+    counts
+}
+
+fn check_filters<M: Mask>(grid: &GridDefinition, filters: &VisitFilters) -> TestResult {
+    let n = grid.node_count();
+    let blocks = compute_blocks::<M>(grid);
+    let allowed = filters.masks::<M>();
+    let expected = enumerate_with_filters(grid, filters.len(), u128::MAX, Some(filters.allowed()));
+    for max_length in 0..=filters.len() {
+        let mut scratch = DpScratch::allocate_filtered(n, &blocks, max_length, &allowed)?;
+        assert_eq!(
+            collect_filtered(&mut scratch, n, &blocks, max_length, &allowed),
+            expected[..=max_length],
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn filtered_prefixes_and_groups_match_geometry_enumeration() -> TestResult {
+    let grid = build_grid_definition(&[3, 3], 0)?;
+    for nodes in [
+        vec![],
+        vec![vec![]],
+        vec![vec![0], vec![1], vec![2, 3]],
+        vec![vec![0], vec![2], vec![1]],
+        vec![vec![0, 1, 2], vec![3, 4, 5], vec![6, 7, 8]],
+        vec![vec![0, 1], vec![], vec![2, 3]],
+        vec![vec![0], (0..9).collect(), (0..9).collect()],
+        vec![(0..9).collect(); 9],
+    ] {
+        let filters = VisitFilters::new(9, nodes)?;
+        check_filters::<u32>(&grid, &filters)?;
+        check_filters::<u64>(&grid, &filters)?;
+        check_filters::<u128>(&grid, &filters)?;
+    }
+    let grid = build_grid_definition(&[4], 2)?;
+    check_filters::<u32>(
+        &grid,
+        &VisitFilters::new(6, vec![vec![4, 5], vec![0, 3], vec![1, 2], vec![4, 5]])?,
+    )
+}
+
+#[test]
+fn free_grids_honor_future_filters_and_high_mask_bits() -> TestResult {
+    let grid = build_grid_definition(&[0], 31)?;
+    check_filters::<u32>(
+        &grid,
+        &VisitFilters::new(31, vec![vec![0, 15, 30], vec![1, 16, 29]])?,
+    )?;
+    let grid = build_grid_definition(&[0], 63)?;
+    check_filters::<u64>(
+        &grid,
+        &VisitFilters::new(63, vec![vec![0, 31, 62], vec![1, 32, 61]])?,
+    )?;
+    let grid = build_grid_definition(&[0], 127)?;
+    check_filters::<u128>(
+        &grid,
+        &VisitFilters::new(127, vec![vec![0, 63, 126], vec![1, 64, 125]])?,
+    )
+}
+
+#[test]
+fn filtered_allocation_distinguishes_zero_seeds_and_restricted_future() -> TestResult {
+    let n = 9;
+    let free = vec![0u32; n * n];
+    let full = u32::low_bits(n);
+    let mut allowed = vec![full; n];
+    allowed[0] = 1;
+    let mut scratch = DpScratch::allocate_filtered(n, &free, n, &allowed)?;
+    assert!(scratch.buf.is_empty());
+    let seeded = collect_filtered(&mut scratch, n, &free, n, &allowed);
+    assert_eq!(seeded[1], 1);
+    assert_eq!(seeded[n], 40320);
+
+    allowed[n - 1] = 1 << (n - 1);
+    let mut scratch = DpScratch::allocate_filtered(n, &free, n, &allowed)?;
+    assert_eq!(scratch.buf.len() as u64, dp_table_bytes(n, n));
+    let restricted = collect_filtered(&mut scratch, n, &free, n, &allowed);
+    assert_eq!(restricted[..n], seeded[..n]);
+    assert_eq!(restricted[n], 5040);
+
+    allowed[0] = 0;
+    let mut scratch = DpScratch::allocate_filtered(n, &free, n, &allowed)?;
+    assert!(scratch.buf.is_empty());
+    assert_eq!(
+        collect_filtered(&mut scratch, n, &free, n, &allowed),
+        [1, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    );
+    Ok(())
+}
+
+#[test]
+fn filtered_scratch_reuse_resets_changed_visit_sets() -> TestResult {
+    let grid = build_grid_definition(&[3, 3], 0)?;
+    let blocks = compute_blocks::<u32>(&grid);
+    let mut scratch = DpScratch::allocate_constrained(9, 3)?;
+    for visits in [
+        vec![vec![0], vec![1], vec![2, 3]],
+        vec![vec![0], vec![2], vec![1]],
+        vec![vec![], vec![1], vec![2]],
+        vec![(0..9).collect(); 3],
+        vec![vec![8], vec![7], vec![6, 5]],
+    ] {
+        let filters = VisitFilters::new(9, visits)?;
+        assert_eq!(
+            collect_filtered(&mut scratch, 9, &blocks, 3, &filters.masks::<u32>()),
+            enumerate_with_filters(&grid, 3, u128::MAX, Some(filters.allowed())),
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn filtered_cancellation_stops_at_every_event() -> TestResult {
+    let grid = build_grid_definition(&[3], 0)?;
+    let blocks = compute_blocks::<u32>(&grid);
+    let allowed = [1, 0b110, 0b101];
+    let mut scratch = DpScratch::allocate_filtered(3, &blocks, 3, &allowed)?;
+    let mut expected = Vec::new();
+    count_patterns_filtered(&mut scratch, 3, &blocks, 3, &allowed, |event| {
+        expected.push(event_record(&event));
+        ControlFlow::Continue(())
+    });
+    for stop in 1..=expected.len() {
+        let mut actual = Vec::new();
+        count_patterns_filtered(&mut scratch, 3, &blocks, 3, &allowed, |event| {
+            actual.push(event_record(&event));
+            if actual.len() == stop {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        assert_eq!(actual, expected[..stop]);
+    }
+    Ok(())
+}
+
+#[test]
+fn future_filters_preserve_width_transitions_and_exact_prefix_counts() -> TestResult {
+    let n = 15;
+    let blocks = vec![0u32; n * n];
+    let mut allowed = vec![u32::low_bits(n); n];
+    allowed[n - 1] = 1 | (1 << 4) | (1 << 8);
+    let mut scratch = DpScratch::allocate_filtered(n, &blocks, n, &allowed)?;
+    let counts = collect_filtered(&mut scratch, n, &blocks, n, &allowed);
+    let mut permutations = 1;
+    for (length, &count) in counts.iter().enumerate() {
+        if length != 0 {
+            permutations *= (n - length + 1) as u128;
+        }
+        let expected = if length == n {
+            permutations / 5
+        } else {
+            permutations
+        };
+        assert_eq!(count, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn empty_first_visit_needs_no_tables_even_for_the_largest_grid() -> TestResult {
+    let n = 127;
+    let mut blocks = vec![0u128; n * n];
+    blocks[0] = 1;
+    let mut allowed = vec![u128::low_bits(n); n];
+    allowed[0] = 0;
+    let mut scratch = DpScratch::allocate_filtered(n, &blocks, n, &allowed)?;
+    assert!(scratch.buf.is_empty());
+    let counts = collect_filtered(&mut scratch, n, &blocks, n, &allowed);
+    assert_eq!(counts.len(), n + 1);
+    assert_eq!(counts[0], 1);
+    assert!(counts[1..].iter().all(|&count| count == 0));
+    Ok(())
 }
