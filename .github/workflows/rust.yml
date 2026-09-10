@@ -2,7 +2,6 @@ name: Rust
 
 on:
   pull_request:
-    branches: ["master", "develop"]
   push:
     branches: ["master"]
 
@@ -28,6 +27,9 @@ jobs:
           tool: lockpick,cargo-llvm-cov,cargo-machete,cargo-audit,cargo-nextest
       - name: Run checks
         run: lockpick -v
+      - name: Test performance comparison helper
+        if: runner.os == 'Linux'
+        run: python3 -B benches/test_compare.py
 
   merge-gate:
     runs-on: ubuntu-latest
