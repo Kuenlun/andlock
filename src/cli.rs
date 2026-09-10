@@ -17,8 +17,9 @@ use serde_json::value::RawValue;
 
 use andlock::canonicalizer::canonicalize;
 use andlock::grid::{GridDefinition, build_grid_definition, parse_dims};
+use andlock::visits::VisitFilters;
 
-use crate::pipeline::{RunOptions, run_pipeline};
+use crate::pipeline::{Precision, RunOptions, run_pipeline};
 use crate::preview::render_for_terminal;
 
 const EXAMPLES: &str = "\
@@ -43,6 +44,11 @@ Examples:
 
   andlock 3x3 --min-length 4 --json > counts.json
       Save exact counts and completion status as JSON.
+
+  andlock --free-points 35 --big-counts
+      Count beyond u128 with arbitrary precision.
+  andlock 3x3 --visits visits.json --json
+      Count patterns matching allowed node sets for each visit.
 
   andlock --file grid.json
       Count patterns on a grid loaded from JSON (`-` reads stdin).
@@ -77,6 +83,18 @@ struct Cli {
     /// Load a JSON `GridDefinition` from <PATH>, or `-` to read stdin.
     #[arg(long, value_name = "PATH")]
     file: Option<PathBuf>,
+
+    /// Load allowed node indices per visit from a JSON array of arrays.
+    ///
+    /// Indices are zero-based: base points first, then free points. Each
+    /// inner array is a set; duplicate indices are ignored. Use `-` for stdin.
+    #[arg(
+        long,
+        value_name = "PATH",
+        conflicts_with = "export_json",
+        help_heading = "Pattern length"
+    )]
+    visits: Option<PathBuf>,
 
     /// Print a shell completion script for <SHELL> to stdout.
     ///
@@ -118,10 +136,16 @@ struct OutputArgs {
     /// Print counts and completion status as one JSON object.
     ///
     /// Includes the grid and requested/completed length ranges. Counts and
-    /// totals are decimal strings to preserve u128 precision. Diagnostics
+    /// totals are decimal strings to preserve full precision. Diagnostics
     /// remain on stderr, and incomplete runs keep their failure exit code.
     #[arg(long, conflicts_with_all = ["export_json", "human"], help_heading = "Output")]
     json: bool,
+
+    /// Use arbitrary precision for counts and totals.
+    ///
+    /// Keeps exact values beyond u128. Can increase runtime on constrained grids.
+    #[arg(long, conflicts_with = "export_json", help_heading = "Resources")]
+    big_counts: bool,
 
     /// Canonicalize the loaded grid before exporting.
     ///
@@ -182,7 +206,8 @@ struct RangeArgs {
 
     /// Skip patterns longer than N points.
     ///
-    /// Defaults to the total point count. A tighter cap reduces runtime
+    /// Defaults to the number of visits with `--visits`, otherwise the point count.
+    /// A tighter cap reduces runtime
     /// because the counter prunes longer prefixes.
     #[arg(long, value_name = "N", help_heading = "Pattern length")]
     max_length: Option<usize>,
@@ -192,18 +217,27 @@ fn parse_memory_size(s: &str) -> Result<u64, parse_size::Error> {
     parse_size::Config::new().with_binary().parse_size(s)
 }
 
-fn resolve_range(range: &RangeArgs, n: usize) -> Result<(usize, usize)> {
+fn resolve_range(range: &RangeArgs, n: usize, visits: Option<usize>) -> Result<(usize, usize)> {
     let min = range.min_length.unwrap_or(0);
-    let max = range.max_length.unwrap_or(n);
+    let max = range.max_length.unwrap_or_else(|| visits.unwrap_or(n));
     if max > n {
         return Err(anyhow!(
             "--max-length ({max}) exceeds the number of points ({n})"
+        ));
+    }
+    if let Some(length) = visits
+        && max > length
+    {
+        return Err(anyhow!(
+            "--max-length ({max}) exceeds the number of visits ({length})"
         ));
     }
     if min > max {
         // Mention --max-length only when the user actually set it.
         return Err(if range.max_length.is_some() {
             anyhow!("--min-length ({min}) must not exceed --max-length ({max})")
+        } else if let Some(length) = visits {
+            anyhow!("--min-length ({min}) exceeds the number of visits ({length})")
         } else {
             anyhow!("--min-length ({min}) exceeds the number of points ({n})")
         });
@@ -223,6 +257,10 @@ pub fn run() -> Result<()> {
         clap_complete::generate(shell, &mut cmd, name, &mut io::stdout());
         return Ok(());
     }
+    if cli.file.as_deref() == Some(Path::new("-")) && cli.visits.as_deref() == Some(Path::new("-"))
+    {
+        return Err(anyhow!("--file and --visits cannot both read from stdin"));
+    }
     let mut grid = match (cli.dims.as_deref(), cli.file.as_deref()) {
         (Some(dims), None) => {
             let parsed = parse_dims(dims).map_err(|e| anyhow!("{e}"))?;
@@ -230,7 +268,7 @@ pub fn run() -> Result<()> {
                 .map_err(|e| anyhow!("{e}"))?
         }
         (None, Some(path)) => {
-            let (content, src_label) = read_grid_source(path)?;
+            let (content, src_label) = read_source(path)?;
             serde_json::from_str(&content)
                 .map_err(|e| anyhow!("failed to parse JSON from {src_label}: {e}"))?
         }
@@ -250,7 +288,18 @@ pub fn run() -> Result<()> {
     if cli.output.simplify {
         grid = canonicalize(&grid);
     }
-    run_grid(&grid, cli.range, cli.memory, cli.output)
+    let visits = cli
+        .visits
+        .as_deref()
+        .map(|path| {
+            let (content, source) = read_source(path)?;
+            let allowed = serde_json::from_str(&content)
+                .map_err(|error| anyhow!("failed to parse visits JSON from {source}: {error}"))?;
+            VisitFilters::new(grid.node_count(), allowed)
+                .map_err(|error| anyhow!("invalid visits from {source}: {error}"))
+        })
+        .transpose()?;
+    run_grid(&grid, cli.range, cli.memory, cli.output, visits.as_ref())
 }
 
 fn run_grid(
@@ -258,12 +307,14 @@ fn run_grid(
     range: RangeArgs,
     memory: MemoryArgs,
     output: OutputArgs,
+    visits: Option<&VisitFilters>,
 ) -> Result<()> {
     let OutputArgs {
         export_json,
         quiet,
         human,
         json,
+        big_counts,
         ..
     } = output;
 
@@ -275,7 +326,8 @@ fn run_grid(
         return Ok(());
     }
 
-    let (min_length, max_length) = resolve_range(&range, grid.node_count())?;
+    let (min_length, max_length) =
+        resolve_range(&range, grid.node_count(), visits.map(VisitFilters::len))?;
     // The preview is decoration, like progress: it goes to
     // stderr so stdout carries nothing but the counts.
     if !quiet && let Some(preview) = render_for_terminal(grid) {
@@ -291,6 +343,12 @@ fn run_grid(
             quiet,
             human,
             json,
+            precision: if big_counts {
+                Precision::Arbitrary
+            } else {
+                Precision::Fixed
+            },
+            visits,
         },
     )
 }
@@ -329,7 +387,7 @@ fn grid_to_json(grid: &GridDefinition) -> Result<String> {
 
 /// Returns the file contents and a label suitable for error messages
 /// (`stdin` for `-`, or a quoted path).
-fn read_grid_source(path: &Path) -> Result<(String, String)> {
+fn read_source(path: &Path) -> Result<(String, String)> {
     if path == Path::new("-") {
         let text = io::read_to_string(io::stdin())
             .map_err(|e| anyhow!("could not read from stdin: {e}"))?;
