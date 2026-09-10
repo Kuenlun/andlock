@@ -32,38 +32,32 @@ fn total(text: &str) -> Option<u128> {
 }
 
 #[test]
-fn memory_limit_fails_with_finalized_partial_counts_even_when_quiet() -> Result<()> {
+fn zero_table_budget_preserves_the_requested_range() -> Result<()> {
+    let reference = run(&["3x3", "--memory-limit", "1MiB", "-q"])?;
     for quiet in [false, true] {
         let mut args = vec!["3x3", "--memory-limit", "0"];
         if quiet {
             args.push("--quiet");
         }
         let output = run(&args)?;
-        let stdout = std::str::from_utf8(&output.stdout)?;
+        assert!(output.status.success());
+        assert_eq!(output.stdout, reference.stdout);
         let stderr = std::str::from_utf8(&output.stderr)?;
-        assert_eq!(output.status.code(), Some(1), "{stderr}");
-        assert_eq!(rows(stdout), [(0, 1), (1, 9)]);
-        assert_eq!(total(stdout), Some(10));
-        assert!(stderr.contains("warning: insufficient memory"), "{stderr}");
-        assert!(stderr.contains("--max-length 1"), "{stderr}");
-        assert!(
-            stderr.contains("length range 0..=9 is incomplete"),
-            "{stderr}"
-        );
+        assert!(!stderr.contains("warning:"), "{stderr}");
         if quiet {
-            assert!(!stderr.contains("Counted"), "{stderr}");
+            assert!(stderr.is_empty(), "{stderr}");
         }
     }
     Ok(())
 }
 
 #[test]
-fn memory_limit_before_minimum_does_not_report_a_zero_total() -> Result<()> {
-    let output = run(&["3x3", "--memory-limit", "0", "--min-length", "2", "-q"])?;
+fn zero_table_budget_counts_selected_long_lengths() -> Result<()> {
+    let output = run(&["3x3", "--memory-limit", "0", "--min-length", "9", "-q"])?;
     let stdout = std::str::from_utf8(&output.stdout)?;
-    assert_eq!(output.status.code(), Some(1));
-    assert!(rows(stdout).is_empty(), "{stdout}");
-    assert_eq!(total(stdout), None);
+    assert!(output.status.success());
+    assert_eq!(rows(stdout), [(9, 140_704)]);
+    assert_eq!(total(stdout), Some(140_704));
     Ok(())
 }
 
