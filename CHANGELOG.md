@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1](https://github.com/Kuenlun/andlock/compare/v0.4.0...v0.4.1) - 2026-09-10
+
+### Fixed
+
+- *(deps)* update dependencies with security advisories ([#82](https://github.com/Kuenlun/andlock/pull/82))
+
 ## [0.4.0](https://github.com/Kuenlun/andlock/compare/v0.3.0...v0.4.0) - 2026-06-12
 
 ### Added
