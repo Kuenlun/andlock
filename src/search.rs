@@ -10,13 +10,14 @@ use std::ops::ControlFlow;
 use num_bigint::BigUint;
 
 use crate::counter::{
-    DpEvent, DpScratch, count_patterns_dp, count_patterns_seeded, dp_table_bytes,
-    effective_max_length, is_unconstrained,
+    DpEvent, DpScratch, count_patterns_dp, count_patterns_filtered, count_patterns_seeded,
+    dp_table_bytes, effective_max_length, future_visits_unrestricted, is_unconstrained,
+    validate_visits,
 };
 use crate::grid::GridDefinition;
 use crate::mask::{MAX_POINTS, Mask};
 use crate::numeric::{CountEvent, GlobalCount, count_unconstrained, local_counts_fit};
-use crate::symmetry::starting_orbits;
+use crate::symmetry::{starting_orbits, starting_orbits_filtered};
 
 /// Counting-table allocation and the prefix length used to stay within it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -123,25 +124,188 @@ pub fn count_patterns_bounded_with<
     blocks: &[M],
     max_length: usize,
     budget: u64,
+    on_event: F,
+) -> Result<(), TryReserveError> {
+    count_with_filters(grid, blocks, max_length, budget, None, on_event)
+}
+
+/// Count patterns with a permitted node set for each successive visit.
+///
+/// Each finalized length uses only its corresponding prefix of `allowed`.
+/// Deterministic prefixes and impossible suffixes are resolved before allocating
+/// counting tables. The budget and event semantics match [`count_patterns_bounded`].
+///
+/// # Errors
+/// Returns an allocation error if the selected counting layers cannot be allocated.
+///
+/// # Panics
+/// Panics for an invalid grid, block matrix, visit mask, or requested length.
+pub fn count_patterns_bounded_filtered<
+    M: Mask,
+    C: GlobalCount,
+    F: FnMut(CountEvent<C>) -> ControlFlow<()>,
+>(
+    grid: &GridDefinition,
+    blocks: &[M],
+    max_length: usize,
+    budget: u64,
+    allowed: &[M],
+    on_event: F,
+) -> Result<(), TryReserveError> {
+    validate_visits(grid.node_count(), max_length, allowed);
+    count_with_filters(grid, blocks, max_length, budget, Some(allowed), on_event)
+}
+
+fn count_with_filters<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>(
+    grid: &GridDefinition,
+    blocks: &[M],
+    max_length: usize,
+    budget: u64,
+    allowed: Option<&[M]>,
     mut on_event: F,
 ) -> Result<(), TryReserveError> {
     let n = grid.node_count();
     assert!(n <= M::MAX_POINTS && max_length <= n);
     assert_eq!(blocks.len(), n * n);
-    let Some(direct_length) = count_direct(n, blocks, max_length, budget, &mut on_event)? else {
-        return Ok(());
+    let active = allowed.map_or(max_length, |allowed| {
+        fixed_prefix(n, blocks, max_length, allowed).active_length
+    });
+    count_active(grid, blocks, active, budget, allowed, &mut |event| {
+        if let CountEvent::LengthDone { length, count } = event {
+            on_event(CountEvent::LengthDone { length, count })?;
+            if length == active {
+                for length in active + 1..=max_length {
+                    on_event(CountEvent::LengthDone {
+                        length,
+                        count: C::default(),
+                    })?;
+                }
+            }
+            ControlFlow::Continue(())
+        } else {
+            on_event(event)
+        }
+    })
+}
+
+struct FixedPrefix<M> {
+    visited: M,
+    last: Option<usize>,
+    length: usize,
+    active_length: usize,
+}
+
+fn fixed_prefix<M: Mask>(
+    n: usize,
+    blocks: &[M],
+    max_length: usize,
+    allowed: &[M],
+) -> FixedPrefix<M> {
+    let mut prefix = FixedPrefix {
+        visited: M::ZERO,
+        last: None,
+        length: 0,
+        active_length: allowed
+            .iter()
+            .take(max_length)
+            .position(|&mask| mask == M::ZERO)
+            .unwrap_or(max_length),
     };
-    let orbits = starting_orbits(grid, blocks);
+    for &allowed in allowed.iter().take(prefix.active_length) {
+        let mut mask = allowed & !prefix.visited;
+        if let Some(last) = prefix.last {
+            let mut candidates = mask;
+            while candidates != M::ZERO {
+                let bit = candidates & candidates.wrapping_neg();
+                candidates ^= bit;
+                if blocks[last * n + bit.trailing_zeros() as usize] & !prefix.visited != M::ZERO {
+                    mask ^= bit;
+                }
+            }
+        }
+        if mask == M::ZERO {
+            prefix.active_length = prefix.length;
+            break;
+        }
+        if mask.count_ones() != 1 {
+            break;
+        }
+        prefix.visited |= mask;
+        prefix.last = Some(mask.trailing_zeros() as usize);
+        prefix.length += 1;
+    }
+    prefix
+}
+
+fn count_active<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>(
+    grid: &GridDefinition,
+    blocks: &[M],
+    max_length: usize,
+    budget: u64,
+    allowed: Option<&[M]>,
+    on_event: &mut F,
+) -> Result<(), TryReserveError> {
+    let n = grid.node_count();
+    assert!(n <= M::MAX_POINTS && max_length <= n);
+    assert_eq!(blocks.len(), n * n);
+    let prefix = allowed.map(|allowed| fixed_prefix(n, blocks, max_length, allowed));
+    let forced = prefix.as_ref().map_or(0, |prefix| prefix.length);
+    let direct_length = if let Some((allowed, prefix)) = allowed
+        .zip(prefix.as_ref())
+        .filter(|(_, prefix)| prefix.length > 0)
+    {
+        for length in 0..=forced {
+            if on_event(CountEvent::LengthDone {
+                length,
+                count: C::from(1),
+            })
+            .is_break()
+            {
+                return Ok(());
+            }
+        }
+        if forced == max_length {
+            return Ok(());
+        }
+        if let Some(starts) = free_tail_starts(n, blocks, max_length, allowed, prefix) {
+            count_unconstrained(
+                n - forced,
+                max_length - forced,
+                starts,
+                &mut |event| match event {
+                    CountEvent::LengthDone { length: 0, .. } => ControlFlow::Continue(()),
+                    CountEvent::LengthDone { length, count } => on_event(CountEvent::LengthDone {
+                        length: length + forced,
+                        count,
+                    }),
+                    other => on_event(other),
+                },
+            );
+            return Ok(());
+        }
+        forced
+    } else {
+        let Some(length) = count_direct(n, blocks, max_length, budget, allowed, on_event)? else {
+            return Ok(());
+        };
+        length
+    };
+    let orbits = allowed.map_or_else(
+        || starting_orbits(grid, blocks),
+        |allowed| starting_orbits_filtered(grid, blocks, &allowed[..max_length]),
+    );
     // Finish each requested length before starting the next. Lower layers are
     // repeated, but interruption preserves every previously completed count.
     for length in direct_length + 1..=max_length {
-        let plan = count_plan_with::<C>(n, length, budget);
+        let mut plan = count_plan_with::<C>(n, length, budget);
+        plan.prefix_length = plan.prefix_length.max(forced);
         let remaining = n - plan.prefix_length;
         let tail_length = length - plan.prefix_length;
         let scratch = DpScratch::allocate_constrained(remaining, tail_length)?;
         let mut counter = PrefixCounter {
             n,
             blocks,
+            allowed,
             full_mask: M::low_bits(n),
             prefix_length: plan.prefix_length,
             tail_length,
@@ -152,7 +316,7 @@ pub fn count_patterns_bounded_with<
             } else {
                 Vec::new()
             },
-            on_event: &mut on_event,
+            on_event: &mut *on_event,
             cancelled: false,
             overflow: false,
         };
@@ -181,16 +345,93 @@ pub fn count_patterns_bounded_with<
     Ok(())
 }
 
+/// Return the number of legal first moves when every later move is unrestricted.
+fn free_tail_starts<M: Mask>(
+    n: usize,
+    blocks: &[M],
+    max_length: usize,
+    allowed: &[M],
+    prefix: &FixedPrefix<M>,
+) -> Option<u128> {
+    let free = M::low_bits(n) & !prefix.visited;
+    if allowed[prefix.length + 1..max_length]
+        .iter()
+        .any(|&mask| mask & free != free)
+    {
+        return None;
+    }
+    let mut origins = free;
+    let mut starts = 0u128;
+    while origins != M::ZERO {
+        let bit = origins & origins.wrapping_neg();
+        origins ^= bit;
+        let origin = bit.trailing_zeros() as usize;
+        let mut targets = free;
+        while targets != M::ZERO {
+            let target = targets & targets.wrapping_neg();
+            targets ^= target;
+            if blocks[origin * n + target.trailing_zeros() as usize] & !prefix.visited != M::ZERO {
+                return None;
+            }
+        }
+        if bit & allowed[prefix.length] != M::ZERO
+            && prefix
+                .last
+                .is_none_or(|last| blocks[last * n + origin] & !prefix.visited == M::ZERO)
+        {
+            starts += 1;
+        }
+    }
+    Some(starts)
+}
+
+/// Peak counting-table storage after resolving deterministic and impossible visits.
+///
+/// # Panics
+/// Panics for an invalid block matrix, visit mask, or requested length.
+#[must_use]
+pub fn filtered_table_bytes<M: Mask, C: GlobalCount>(
+    n: usize,
+    blocks: &[M],
+    max_length: usize,
+    budget: u64,
+    allowed: &[M],
+) -> u64 {
+    validate_visits(n, max_length, allowed);
+    assert_eq!(blocks.len(), n * n);
+    let prefix = fixed_prefix(n, blocks, max_length, allowed);
+    let active = prefix.active_length;
+    if prefix.length == active || free_tail_starts(n, blocks, active, allowed, &prefix).is_some() {
+        return 0;
+    }
+    (prefix.length + 1..=active)
+        .map(|length| {
+            let plan = count_plan_with::<C>(n, length, budget);
+            let fixed = plan.prefix_length.max(prefix.length);
+            dp_table_bytes(n - fixed, length - fixed)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
 /// Return the last direct length when partitioned continuations are still needed.
 fn count_direct<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>(
     n: usize,
     blocks: &[M],
     max_length: usize,
     budget: u64,
+    allowed: Option<&[M]>,
     on_event: &mut F,
 ) -> Result<Option<usize>, TryReserveError> {
-    if is_unconstrained(blocks) {
-        count_unconstrained(n, max_length, n as u128, on_event);
+    if is_unconstrained(blocks)
+        && allowed.is_none_or(|allowed| future_visits_unrestricted(n, max_length, allowed))
+    {
+        let starts = allowed.map_or(n as u128, |allowed| {
+            allowed
+                .first()
+                .map_or(0, |mask| u128::from(mask.count_ones()))
+        });
+        count_unconstrained(n, max_length, starts, on_event);
         return Ok(None);
     }
     let mut direct_length = effective_max_length(n, max_length, budget);
@@ -199,26 +440,38 @@ fn count_direct<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<
             direct_length -= 1;
         }
     }
-    let mut scratch = DpScratch::allocate(n, blocks, direct_length)?;
+    let mut scratch = allowed.map_or_else(
+        || DpScratch::allocate(n, blocks, direct_length),
+        |allowed| DpScratch::allocate_filtered(n, blocks, direct_length, allowed),
+    )?;
     if direct_length == max_length {
-        count_patterns_dp(&mut scratch, n, blocks, max_length, |event| {
-            on_event(event.into())
-        });
+        let forward = |event: DpEvent| on_event(event.into());
+        if let Some(allowed) = allowed {
+            count_patterns_filtered(&mut scratch, n, blocks, max_length, allowed, forward);
+        } else {
+            count_patterns_dp(&mut scratch, n, blocks, max_length, forward);
+        }
         return Ok(None);
     }
     let mut stopped = false;
-    count_patterns_dp(&mut scratch, n, blocks, direct_length, |event| {
+    let forward = |event| {
         stopped |= matches!(event, DpEvent::Overflow);
         let flow = on_event(event.into());
         stopped |= flow.is_break();
         flow
-    });
-    Ok((!stopped).then_some(direct_length))
+    };
+    if let Some(allowed) = allowed {
+        count_patterns_filtered(&mut scratch, n, blocks, direct_length, allowed, forward);
+    } else {
+        count_patterns_dp(&mut scratch, n, blocks, direct_length, forward);
+    }
+    Ok((!stopped && direct_length < max_length).then_some(direct_length))
 }
 
 struct PrefixCounter<'a, M, C, F> {
     n: usize,
     blocks: &'a [M],
+    allowed: Option<&'a [M]>,
     full_mask: M,
     prefix_length: usize,
     tail_length: usize,
@@ -245,7 +498,10 @@ impl<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>
             self.continue_prefix(visited, last, weight);
             return;
         }
-        let mut free = self.full_mask & !visited;
+        let mut free = self
+            .allowed
+            .map_or(self.full_mask, |allowed| allowed[length])
+            & !visited;
         while free != M::ZERO && !self.cancelled && !self.overflow {
             let bit = free & free.wrapping_neg();
             free ^= bit;
@@ -256,19 +512,28 @@ impl<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>
         }
     }
 
+    fn legal_degree(&self, visited: M, last: usize) -> u128 {
+        let mut free = self
+            .allowed
+            .map_or(self.full_mask, |allowed| allowed[self.prefix_length])
+            & !visited;
+        let mut degree = 0;
+        while free != M::ZERO {
+            let bit = free & free.wrapping_neg();
+            free ^= bit;
+            let next = bit.trailing_zeros() as usize;
+            if self.blocks[last * self.n + next] & !visited == M::ZERO {
+                degree += 1;
+            }
+        }
+        degree
+    }
+
     fn continue_prefix(&mut self, visited: M, last: usize, weight: u128) {
         if self.tail_length == 1 {
-            let mut free = self.full_mask & !visited;
-            let mut degree = 0u128;
-            while free != M::ZERO {
-                let bit = free & free.wrapping_neg();
-                free ^= bit;
-                let next = bit.trailing_zeros() as usize;
-                if self.blocks[last * self.n + next] & !visited == M::ZERO {
-                    degree += 1;
-                }
-            }
-            self.overflow = !self.count.add_scaled(degree, weight);
+            self.overflow = !self
+                .count
+                .add_scaled(self.legal_degree(visited, last), weight);
             return;
         }
         let remaining = self.n - self.prefix_length;
@@ -300,38 +565,68 @@ impl<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>
                 self.reduced[a * remaining + b] = mapped;
             }
         }
+        let mut reduced_allowed = [M::ZERO; MAX_POINTS];
+        if let Some(allowed) = self.allowed {
+            for (index, &mask) in allowed[self.prefix_length..self.prefix_length + self.tail_length]
+                .iter()
+                .enumerate()
+            {
+                for (mapped, &node) in nodes[..remaining].iter().enumerate() {
+                    if mask & M::bit(node) != M::ZERO {
+                        reduced_allowed[index] |= M::bit(mapped);
+                    }
+                }
+            }
+            reduced_allowed[0] = reduced_allowed[0] & starts;
+            starts = reduced_allowed[0];
+        }
+        if starts == M::ZERO {
+            return;
+        }
         let tail_length = self.tail_length;
         let total = &mut self.count;
         let overflow = &mut self.overflow;
         let cancelled = &mut self.cancelled;
         let on_event = &mut self.on_event;
-        count_patterns_seeded(
-            &mut self.scratch,
-            remaining,
-            &self.reduced,
-            self.tail_length,
-            starts,
-            |event| {
-                match event {
-                    DpEvent::LengthDone { length, count } => {
-                        if length == tail_length {
-                            *overflow = !total.add_scaled(count, weight);
-                        }
-                    }
-                    DpEvent::Overflow => *overflow = true,
-                    DpEvent::Mask => {
-                        if on_event(CountEvent::Mask).is_break() {
-                            *cancelled = true;
-                        }
+        let forward = |event| {
+            match event {
+                DpEvent::LengthDone { length, count } => {
+                    if length == tail_length {
+                        *overflow = !total.add_scaled(count, weight);
                     }
                 }
-                if *cancelled || *overflow {
-                    ControlFlow::Break(())
-                } else {
-                    ControlFlow::Continue(())
+                DpEvent::Overflow => *overflow = true,
+                DpEvent::Mask => {
+                    if on_event(CountEvent::Mask).is_break() {
+                        *cancelled = true;
+                    }
                 }
-            },
-        );
+            }
+            if *cancelled || *overflow {
+                ControlFlow::Break(())
+            } else {
+                ControlFlow::Continue(())
+            }
+        };
+        if self.allowed.is_some() {
+            count_patterns_filtered(
+                &mut self.scratch,
+                remaining,
+                &self.reduced,
+                tail_length,
+                &reduced_allowed[..tail_length],
+                forward,
+            );
+        } else {
+            count_patterns_seeded(
+                &mut self.scratch,
+                remaining,
+                &self.reduced,
+                tail_length,
+                starts,
+                forward,
+            );
+        }
     }
 }
 

@@ -19,7 +19,11 @@ use andlock::counter::{dp_mask_ticks, dp_table_bytes, is_unconstrained};
 use andlock::grid::{GridDefinition, compute_blocks};
 use andlock::mask::{self, Mask, Width};
 use andlock::numeric::{CountEvent, GlobalCount, local_counts_fit};
-use andlock::search::{count_patterns_bounded_with, count_plan_with};
+use andlock::search::{
+    count_patterns_bounded_filtered, count_patterns_bounded_with, count_plan_with,
+    filtered_table_bytes,
+};
+use andlock::visits::VisitFilters;
 
 use crate::memory::resolve_memory_budget;
 use crate::output::{
@@ -35,7 +39,7 @@ pub enum Precision {
 }
 
 #[derive(Copy, Clone)]
-pub struct RunOptions {
+pub struct RunOptions<'a> {
     pub min_length: usize,
     pub max_length: usize,
     pub memory_limit: Option<u64>,
@@ -43,6 +47,7 @@ pub struct RunOptions {
     pub human: bool,
     pub json: bool,
     pub precision: Precision,
+    pub visits: Option<&'a VisitFilters>,
 }
 
 fn spinner_style() -> ProgressStyle {
@@ -71,14 +76,14 @@ fn bar_style() -> ProgressStyle {
 /// Panics if `grid.node_count() > mask::MAX_POINTS`. The CLI calls
 /// [`GridDefinition::validate`](andlock::grid::GridDefinition::validate)
 /// upstream, which rejects oversized grids with a user-facing error.
-pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
+pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions<'_>) -> Result<()> {
     match opts.precision {
         Precision::Fixed => run_with_count::<u128>(grid, opts),
         Precision::Arbitrary => run_with_count::<BigUint>(grid, opts),
     }
 }
 
-fn run_with_count<C: GlobalCount>(grid: &GridDefinition, opts: RunOptions) -> Result<()> {
+fn run_with_count<C: GlobalCount>(grid: &GridDefinition, opts: RunOptions<'_>) -> Result<()> {
     let n = grid.node_count();
     let mp = tty::progress();
 
@@ -132,7 +137,7 @@ impl<C> DpRunOutcome<C> {
 fn run_dp_sequence<M: Mask, C: GlobalCount>(
     grid: &GridDefinition,
     n: usize,
-    opts: RunOptions,
+    opts: RunOptions<'_>,
     mp: &MultiProgress,
 ) -> DpRunOutcome<C> {
     let RunOptions {
@@ -151,20 +156,27 @@ fn run_dp_sequence<M: Mask, C: GlobalCount>(
     }
 
     let budget = resolve_memory_budget(memory_limit);
-    let unconstrained = is_unconstrained(&blocks);
-    let partitioned = !unconstrained
-        && (dp_table_bytes(n, max_length) > budget
-            || (C::ARBITRARY_PRECISION && !local_counts_fit(n, max_length)));
-    let peak = if unconstrained {
-        0
-    } else if partitioned {
-        (0..=max_length)
-            .map(|length| count_plan_with::<C>(n, length, budget).table_bytes)
-            .max()
-            .unwrap_or(0)
-    } else {
-        dp_table_bytes(n, max_length)
-    };
+    let allowed = opts.visits.map(VisitFilters::masks::<M>);
+    let unconstrained = is_unconstrained(&blocks) && allowed.is_none();
+    let partitioned = allowed.is_some()
+        || (!unconstrained
+            && (dp_table_bytes(n, max_length) > budget
+                || (C::ARBITRARY_PRECISION && !local_counts_fit(n, max_length))));
+    let peak = allowed.as_ref().map_or_else(
+        || {
+            if unconstrained {
+                0
+            } else if partitioned {
+                (0..=max_length)
+                    .map(|length| count_plan_with::<C>(n, length, budget).table_bytes)
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                dp_table_bytes(n, max_length)
+            }
+        },
+        |allowed| filtered_table_bytes::<M, C>(n, &blocks, max_length, budget, allowed),
+    );
     let mem_str = HumanBytes(peak).to_string();
     let count_pb = build_dp_bar(mp, n, max_length, &mem_str, quiet, partitioned);
     let mut printer = LengthPrinter::new(mp, min_length, max_length, human, count_pb.as_ref());
@@ -173,8 +185,8 @@ fn run_dp_sequence<M: Mask, C: GlobalCount>(
     let progress = drive_dp::<M, C>(
         grid,
         &blocks,
-        max_length,
-        budget,
+        (max_length, budget),
+        allowed.as_deref(),
         &mem_str,
         count_pb.as_ref(),
         &mut printer,
@@ -299,19 +311,20 @@ struct CountProgress {
 fn drive_dp<M: Mask, C: GlobalCount>(
     grid: &GridDefinition,
     blocks: &[M],
-    effective: usize,
-    budget: u64,
+    limits: (usize, u64),
+    allowed: Option<&[M]>,
     mem_str: &str,
     count_pb: Option<&ProgressBar>,
     printer: &mut LengthPrinter<'_, C>,
 ) -> CountProgress {
+    let (effective, budget) = limits;
     let n = grid.node_count();
     let mut last_emitted: Option<usize> = None;
     let mut overflow = false;
     let mut ticks: u64 = 0;
     let mut flushed: u64 = 0;
 
-    let allocation_error = count_patterns_bounded_with(grid, blocks, effective, budget, |event| {
+    let forward = |event| {
         match event {
             CountEvent::Mask => {
                 if let Some(pb) = count_pb {
@@ -341,7 +354,12 @@ fn drive_dp<M: Mask, C: GlobalCount>(
         } else {
             ControlFlow::Continue(())
         }
-    })
+    };
+    let allocation_error = if let Some(allowed) = allowed {
+        count_patterns_bounded_filtered(grid, blocks, effective, budget, allowed, forward)
+    } else {
+        count_patterns_bounded_with(grid, blocks, effective, budget, forward)
+    }
     .err();
 
     CountProgress {
@@ -356,7 +374,7 @@ fn drive_dp<M: Mask, C: GlobalCount>(
 fn print_report<C: GlobalCount>(
     outcome: &DpRunOutcome<C>,
     grid: &GridDefinition,
-    opts: RunOptions,
+    opts: RunOptions<'_>,
 ) -> Result<()> {
     if opts.json {
         println!(
@@ -371,6 +389,7 @@ fn print_report<C: GlobalCount>(
                 outcome.last_completed,
                 outcome.total.as_ref(),
                 outcome.status,
+                opts.visits,
             )?
         );
         return Ok(());
@@ -404,7 +423,7 @@ fn print_report<C: GlobalCount>(
     Ok(())
 }
 
-fn print_footer<C>(outcome: &DpRunOutcome<C>, opts: RunOptions) {
+fn print_footer<C>(outcome: &DpRunOutcome<C>, opts: RunOptions<'_>) {
     let elapsed = outcome.elapsed;
     if outcome.status == RunStatus::Interrupted {
         let last = outcome
@@ -440,7 +459,8 @@ mod tests {
         // Each move requires its unvisited destination, so length 2 has no patterns.
         let blocks = [0u32, 2, 1, 0];
         let grid = andlock::grid::build_grid_definition(&[2], 0).map_err(anyhow::Error::msg)?;
-        let progress = drive_dp::<_, u128>(&grid, &blocks, 2, 64, "64 B", None, &mut printer);
+        let progress =
+            drive_dp::<_, u128>(&grid, &blocks, (2, 64), None, "64 B", None, &mut printer);
         assert!(!progress.overflow);
         let outcome = DpRunOutcome {
             entries: printer.finish(),

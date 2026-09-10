@@ -134,6 +134,31 @@ impl DpScratch {
         Self::allocate_constrained(n, max_length)
     }
 
+    /// Allocates scratch for [`count_patterns_filtered`]. Restrictions after
+    /// the first visit can require layers even when every geometric move is legal.
+    ///
+    /// # Errors
+    /// Returns an allocation error when the required layers cannot be reserved.
+    ///
+    /// # Panics
+    /// Panics for invalid visit masks, too many visits, or an unsupported mask width.
+    pub fn allocate_filtered<M: Mask>(
+        n: usize,
+        blocks: &[M],
+        max_length: usize,
+        allowed: &[M],
+    ) -> Result<Self, std::collections::TryReserveError> {
+        validate_visits(n, max_length, allowed);
+        if max_length == 0 || allowed[0] == M::ZERO {
+            return Self::allocate(n, blocks, 0);
+        }
+        if future_visits_unrestricted(n, max_length, allowed) {
+            Self::allocate(n, blocks, max_length)
+        } else {
+            Self::allocate_constrained(n, max_length)
+        }
+    }
+
     pub(crate) fn allocate_constrained(
         n: usize,
         max_length: usize,
@@ -253,15 +278,84 @@ pub fn count_patterns_dp<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     count_patterns_seeded(scratch, n, blocks, max_length, M::low_bits(n), on_event);
 }
 
+/// Counts paths that visit a node in `allowed[p - 1]` at position `p`.
+///
+/// The empty pattern counts once. Each finalized length applies only its own
+/// prefix of the filters. Use [`DpScratch::allocate_filtered`] for allocation.
+/// Events and cancellation follow [`count_patterns_dp`].
+///
+/// # Panics
+/// Panics for an invalid block matrix or scratch, out-of-grid visit masks,
+/// more visits than nodes, or `max_length > allowed.len()`.
+/// The chosen mask width must represent all nodes.
+pub fn count_patterns_filtered<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
+    scratch: &mut DpScratch,
+    n: usize,
+    blocks: &[M],
+    max_length: usize,
+    allowed: &[M],
+    on_event: F,
+) {
+    validate_visits(n, max_length, allowed);
+    let starts = allowed.first().copied().unwrap_or(M::ZERO);
+    count_patterns_with_visits(
+        scratch,
+        n,
+        blocks,
+        max_length,
+        starts,
+        Some(allowed),
+        on_event,
+    );
+}
+
+pub(crate) fn validate_visits<M: Mask>(n: usize, max_length: usize, allowed: &[M]) {
+    assert!(n <= M::MAX_POINTS, "too many nodes for mask width");
+    assert!(allowed.len() <= n, "more visits than nodes");
+    assert!(
+        max_length <= allowed.len(),
+        "maximum length exceeds visit filters"
+    );
+    let full = M::low_bits(n);
+    assert!(
+        allowed.iter().all(|&nodes| nodes & full == nodes),
+        "visit node outside grid"
+    );
+}
+
+pub(crate) fn future_visits_unrestricted<M: Mask>(
+    n: usize,
+    max_length: usize,
+    allowed: &[M],
+) -> bool {
+    let full = M::low_bits(n);
+    allowed
+        .iter()
+        .take(max_length)
+        .skip(1)
+        .all(|&nodes| nodes == full)
+}
+
 /// Counts paths whose first node belongs to `starts`. Singleton weights are
 /// either zero or one, preserving the same factorial bound as the full DP.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn count_patterns_seeded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     scratch: &mut DpScratch,
     n: usize,
     blocks: &[M],
     max_length: usize,
     starts: M,
+    on_event: F,
+) {
+    count_patterns_with_visits(scratch, n, blocks, max_length, starts, None, on_event);
+}
+
+fn count_patterns_with_visits<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
+    scratch: &mut DpScratch,
+    n: usize,
+    blocks: &[M],
+    max_length: usize,
+    starts: M,
+    allowed: Option<&[M]>,
     mut on_event: F,
 ) {
     assert!(n <= M::MAX_POINTS, "too many nodes for mask width");
@@ -274,7 +368,10 @@ pub(crate) fn count_patterns_seeded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()
 
     // With every move legal, counts[k] = |starts| * P(n - 1, k - 1).
     // Stream each exact length, stopping before the first product overflow.
-    if is_unconstrained(blocks) {
+    if starts == M::ZERO
+        || (is_unconstrained(blocks)
+            && allowed.is_none_or(|visits| future_visits_unrestricted(n, max_length, visits)))
+    {
         count_unconstrained::<u128, _>(n, max_length, u128::from(starts.count_ones()), |event| {
             on_event(event.into())
         });
@@ -331,6 +428,7 @@ pub(crate) fn count_patterns_seeded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()
             n,
             p,
             blocks,
+            allowed: allowed.map_or_else(|| M::low_bits(n), |visits| visits[p]),
             current: dp_curr,
             next: dp_next,
         };
@@ -374,12 +472,36 @@ struct Layer<'a, M> {
     n: usize,
     p: usize,
     blocks: &'a [M],
+    allowed: M,
     current: &'a [u8],
     next: &'a mut [u8],
 }
 
+/// Cache bit positions and the prefix/suffix sums used to rank a successor mask.
+#[inline]
+fn colex_sums<M: Mask>(
+    mask: M,
+    bit_pos: &mut [u32; SLOTS],
+    prefix_sum: &mut [usize; SLOTS],
+    suffix_sum: &mut [usize; SLOTS],
+) {
+    let mut tmp = mask;
+    let mut i = 0usize;
+    while tmp != M::ZERO {
+        let bit = tmp & tmp.wrapping_neg();
+        let pos = bit.trailing_zeros();
+        bit_pos[i] = pos;
+        prefix_sum[i + 1] = prefix_sum[i] + BINOM[pos as usize][i + 1];
+        tmp ^= bit;
+        i += 1;
+    }
+    suffix_sum[i] = 0;
+    for j in (0..i).rev() {
+        suffix_sum[j] = suffix_sum[j + 1] + BINOM[bit_pos[j] as usize][j + 2];
+    }
+}
+
 impl<M: Mask> Layer<'_, M> {
-    #[allow(clippy::too_many_lines)]
     fn count<const NEXT_BYTES: usize, F: FnMut(DpEvent) -> ControlFlow<()>>(
         self,
         read_current: ReadCell,
@@ -389,11 +511,11 @@ impl<M: Mask> Layer<'_, M> {
             n,
             p,
             blocks,
+            allowed,
             current,
             next: dp_next,
         } = self;
         let next_p = p + 1;
-        let full_mask = M::low_bits(n);
         let mut prefix_sum = [0usize; SLOTS];
         let mut suffix_sum = [0usize; SLOTS];
         let mut bit_pos = [0u32; SLOTS];
@@ -419,26 +541,12 @@ impl<M: Mask> Layer<'_, M> {
             let base_curr = idx_curr * p;
 
             if NEXT_BYTES != 0 {
-                // Cache mask bit positions and the colex-rank decomposition.
-                let mut tmp = mask;
-                let mut i = 0usize;
-                while tmp != M::ZERO {
-                    let bit = tmp & tmp.wrapping_neg();
-                    let pos = bit.trailing_zeros();
-                    bit_pos[i] = pos;
-                    prefix_sum[i + 1] = prefix_sum[i] + BINOM[pos as usize][i + 1];
-                    tmp ^= bit;
-                    i += 1;
-                }
-                suffix_sum[p] = 0;
-                for j in (0..p).rev() {
-                    suffix_sum[j] = suffix_sum[j + 1] + BINOM[bit_pos[j] as usize][j + 2];
-                }
+                colex_sums(mask, &mut bit_pos, &mut prefix_sum, &mut suffix_sum);
             }
 
             // Hoist per-next colex arithmetic out of the endpoint loop.
             let mut nfree = 0usize;
-            let mut free = !mask & full_mask;
+            let mut free = !mask & allowed;
             while free != M::ZERO {
                 let next_bit = free & free.wrapping_neg();
                 free ^= next_bit;

@@ -94,6 +94,18 @@ The empty pattern and any single node count as valid by convention.
 
 `points` holds integer coordinates with magnitude up to 2³⁰ − 1; `free_points` (optional, default 0) adds isolated nodes. At most 127 nodes in total. `--simplify` rewrites a loaded grid into canonical form — the points above become `[[-1, 0], [0, 0], [1, 0]]` — which never changes any count.
 
+## Visit filters
+
+`--visits visits.json` restricts each visit to a set of node indices:
+
+```json
+[[0], [1], [2, 3]]
+```
+
+On `3x3`, this permits `0, 1, 2` and `0, 1, 3` at length 3. Each shorter count uses only its own prefix of the filters. Indices start at zero, following `points` in the grid JSON, then the free nodes. Duplicate indices are ignored; an empty set makes that length and every later count zero.
+
+The default maximum length is the number of sets. Explicit length ranges must fit within it. Use `--visits -` to read stdin. Only one input may use stdin. Count reports include the normalized `visits` array when supplied.
+
 ## Cost
 
 Without the visibility rule the count over N nodes would be exactly `floor(e · N!)`. The rule prunes that set, but the result still grows like `O(N!)`. Use `--max-length` to limit work and `--memory-limit` to cap counting-table storage. The default budget is 80% of available RAM (512 MiB if detection fails). When complete layers do not fit, andlock partitions valid prefixes and reuses smaller tables, preserving the requested length range. A zero budget uses traversal without counting tables. Input and result storage are additional; runtime can still grow exponentially.
