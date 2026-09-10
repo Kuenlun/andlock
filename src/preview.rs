@@ -89,8 +89,9 @@ fn project(grid: &GridDefinition) -> (usize, usize, HashSet<(usize, usize)>) {
         .points
         .iter()
         .map(|p| {
+            let x = p.first().copied().unwrap_or(0);
             let y = if grid.dimensions >= 2 { p[1] } else { 0 };
-            (i64::from(p[0]), i64::from(y))
+            (i64::from(x), i64::from(y))
         })
         .unzip();
     let span = |values: &[i64]| {
