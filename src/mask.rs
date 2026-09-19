@@ -23,18 +23,27 @@ pub trait Mask:
     + Not<Output = Self>
     + Shl<usize, Output = Self>
 {
+    /// Empty visited set.
     const ZERO: Self;
+    /// Largest supported node count for this mask width.
     const MAX_POINTS: usize;
 
+    /// One bit at index i, which must be below the mask bit width.
     fn bit(i: usize) -> Self;
+    /// The lowest n bits set, with n at most [`Self::MAX_POINTS`].
     fn low_bits(n: usize) -> Self;
+    /// Number of set bits.
     fn count_ones(self) -> u32;
+    /// Index of the lowest set bit, or the bit width for an empty mask.
     fn trailing_zeros(self) -> u32;
+    /// Two's-complement negation, wrapping at the mask width.
     #[must_use]
     fn wrapping_neg(self) -> Self;
+    /// Subtract one, wrapping at the mask width.
     #[must_use]
     fn wrapping_sub_one(self) -> Self;
     /// Next mask with the same popcount (Gosper's hack).
+    /// The mask must be nonzero and have a representable successor.
     #[must_use]
     fn gosper_next(self) -> Self;
 }
@@ -50,6 +59,10 @@ macro_rules! impl_mask {
                 1 << i
             }
             #[inline]
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "n is below the bit width, so the shifted one is nonzero."
+            )]
             fn low_bits(n: usize) -> Self {
                 (1 << n) - 1
             }
@@ -70,6 +83,10 @@ macro_rules! impl_mask {
                 self.wrapping_sub(1)
             }
             #[inline]
+            #[expect(
+                clippy::arithmetic_side_effects,
+                reason = "The nonzero input mask has a nonzero isolated low bit."
+            )]
             fn gosper_next(self) -> Self {
                 let c = self & self.wrapping_neg();
                 let r = self.wrapping_add(c);
@@ -89,8 +106,11 @@ pub const MAX_POINTS: usize = <u128 as Mask>::MAX_POINTS;
 /// Width tag returned by [`smallest_for`].
 #[derive(Copy, Clone, Eq, PartialEq, Debug)]
 pub enum Width {
+    /// 32-bit visited set.
     U32,
+    /// 64-bit visited set.
     U64,
+    /// 128-bit visited set.
     U128,
 }
 

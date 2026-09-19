@@ -2,7 +2,19 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    clippy::indexing_slicing,
+    reason = "Test fixtures have fixed shapes; missing expected counts or JSON fields must fail the test."
+)]
+
 //! Arbitrary-precision output and agreement with the fixed-width counting mode.
+
+// Cargo shares package dependencies across its library, binary and test targets.
+use {
+    andlock as _, clap as _, clap_cargo as _, clap_complete as _, console as _, criterion as _,
+    ctrlc as _, indicatif as _, parse_size as _, portable_pty as _, serde as _, sysinfo as _,
+    vt100 as _,
+};
 
 use std::process::{Command, Output};
 
@@ -12,9 +24,9 @@ use serde_json::Value;
 
 fn run(args: &[&str], big: bool) -> Result<(Output, Value)> {
     let mut command = Command::new(env!("CARGO_BIN_EXE_andlock"));
-    command.args(args).args(["--json", "--quiet"]);
+    let _command = command.args(args).args(["--json", "--quiet"]);
     if big {
-        command.arg("--big-counts");
+        let _command = command.arg("--big-counts");
     }
     let output = command.output()?;
     let report = serde_json::from_slice(&output.stdout)?;
@@ -23,7 +35,7 @@ fn run(args: &[&str], big: bool) -> Result<(Output, Value)> {
 
 #[test]
 fn free_point_counts_and_totals_remain_exact_beyond_u128() -> Result<()> {
-    for n in [35usize, 127] {
+    for n in [35_usize, 127] {
         let (output, report) = run(
             &["--free-points", &n.to_string(), "--memory-limit", "0"],
             true,
@@ -52,19 +64,19 @@ fn free_point_counts_and_totals_remain_exact_beyond_u128() -> Result<()> {
 #[test]
 fn default_mode_retains_explicit_count_and_total_overflow() -> Result<()> {
     let (overflow, report) = run(&["--free-points", "35"], false)?;
-    assert_eq!(overflow.status.code(), Some(1));
+    assert_eq!(overflow.status.code(), Some(1_i32));
     assert_eq!(report["status"], "count_overflow");
 
     let args = ["--free-points", "34", "--min-length", "33"];
     let (limited, limited_report) = run(&args, false)?;
     let (exact, exact_report) = run(&args, true)?;
-    assert_eq!(limited.status.code(), Some(1));
+    assert_eq!(limited.status.code(), Some(1_i32));
     assert_eq!(limited_report["status"], "total_overflow");
     assert!(exact.status.success());
     assert_eq!(exact_report["status"], "complete");
     assert_eq!(limited_report["counts"], exact_report["counts"]);
-    let factorial: BigUint = (1u32..=34).map(BigUint::from).product();
-    assert_eq!(exact_report["total"], (factorial * 2u32).to_string());
+    let factorial: BigUint = (1_u32..=34).map(BigUint::from).product();
+    assert_eq!(exact_report["total"], (factorial * 2_u32).to_string());
     Ok(())
 }
 
@@ -107,7 +119,7 @@ fn big_counts_support_human_text_output() -> Result<()> {
         .context("length 35 row")?;
     let count = row.split_whitespace().nth(1).context("human count")?;
     assert!(count.contains('_'));
-    let factorial: BigUint = (1u32..=35).map(BigUint::from).product();
+    let factorial: BigUint = (1_u32..=35).map(BigUint::from).product();
     assert_eq!(count.replace('_', ""), factorial.to_string());
     Ok(())
 }
@@ -117,7 +129,7 @@ fn big_counts_reject_grid_export() -> Result<()> {
     let output = Command::new(env!("CARGO_BIN_EXE_andlock"))
         .args(["3x3", "--big-counts", "--export-json"])
         .output()?;
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(2_i32));
     assert!(output.stdout.is_empty());
     assert!(std::str::from_utf8(&output.stderr)?.contains("cannot be used with"));
     Ok(())
@@ -151,8 +163,8 @@ fn arbitrary_precision_interruption_preserves_exact_partial_output() -> Result<(
         .status()?;
     assert!(signal.success());
     let output = child.wait_with_output()?;
-    stderr.read_to_string(&mut diagnostics)?;
-    assert_eq!(output.status.code(), Some(130), "{diagnostics}");
+    let _bytes = stderr.read_to_string(&mut diagnostics)?;
+    assert_eq!(output.status.code(), Some(130_i32), "{diagnostics}");
     let report: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(report["status"], "interrupted");
     let counts = report["counts"].as_array().context("count array")?;

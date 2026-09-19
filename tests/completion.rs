@@ -2,7 +2,19 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    clippy::as_conversions,
+    reason = "Fixture node counts are at most 127 and integer widening preserves the reference values."
+)]
+
 //! Process-level completion, partial-result, and diagnostic contracts.
+
+// Cargo shares package dependencies across its library, binary and test targets.
+use {
+    clap as _, clap_cargo as _, clap_complete as _, console as _, criterion as _, ctrlc as _,
+    indicatif as _, num_bigint as _, parse_size as _, portable_pty as _, serde as _, sysinfo as _,
+    vt100 as _,
+};
 
 use std::process::{Command, Output};
 
@@ -74,7 +86,7 @@ fn count_overflow_preserves_every_exact_length_even_when_quiet() -> Result<()> {
         let expected: Vec<_> = (0..=30)
             .map(|length| (length, ((36 - length)..=35).map(|n| n as u128).product()))
             .collect();
-        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert_eq!(output.status.code(), Some(1_i32), "{stderr}");
         assert_eq!(rows(stdout), expected);
         assert_eq!(total(stdout), Some(expected.iter().map(|(_, n)| n).sum()));
         assert!(
@@ -94,7 +106,7 @@ fn count_overflow_before_minimum_does_not_report_a_zero_total() -> Result<()> {
     let output = run(&["--free-points", "35", "--min-length", "31", "-q"])?;
     let stdout = std::str::from_utf8(&output.stdout)?;
     let stderr = std::str::from_utf8(&output.stderr)?;
-    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert_eq!(output.status.code(), Some(1_i32), "{stderr}");
     assert!(rows(stdout).is_empty(), "{stdout}");
     assert_eq!(total(stdout), None);
     assert!(
@@ -115,7 +127,7 @@ fn selected_range_total_overflow_fails_with_exact_rows_even_when_quiet() -> Resu
         let stdout = std::str::from_utf8(&output.stdout)?;
         let stderr = std::str::from_utf8(&output.stderr)?;
         let factorial: u128 = (1..=34).product();
-        assert_eq!(output.status.code(), Some(1), "{stderr}");
+        assert_eq!(output.status.code(), Some(1_i32), "{stderr}");
         assert_eq!(rows(stdout), [(33, factorial), (34, factorial)]);
         assert_eq!(total(stdout), None);
         assert!(

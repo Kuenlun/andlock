@@ -2,6 +2,32 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+//! Compare visit-filtered counts against exhaustive fixed-grid reference results.
+
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "Reference calculations use bounded fixture sizes and values chosen to fit their result types."
+)]
+#![expect(
+    clippy::as_conversions,
+    reason = "Fixture node counts are at most 127 and integer widening preserves the reference values."
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "Test fixtures have fixed shapes; missing expected counts or JSON fields must fail the test."
+)]
+#![expect(
+    clippy::panic,
+    reason = "Subprocess and event fixtures fail immediately when the expected test protocol is violated."
+)]
+
+// Cargo shares package dependencies across its library, binary and test targets.
+use {
+    anyhow as _, clap as _, clap_cargo as _, clap_complete as _, console as _, criterion as _,
+    ctrlc as _, indicatif as _, parse_size as _, portable_pty as _, serde as _, serde_json as _,
+    sysinfo as _, vt100 as _,
+};
+
 use std::ops::ControlFlow;
 
 use andlock::grid::{GridDefinition, build_grid_definition, compute_blocks};
@@ -112,7 +138,7 @@ fn check<M: Mask>(
     let filters = VisitFilters::new(grid.node_count(), allowed)?;
     let expected = brute(grid, &filters);
     for maximum in 0..=filters.len() {
-        for budget in [0, 1, 9, 64, 257, 1024, 1 << 20] {
+        for budget in [0, 1, 9, 64, 257, 1024, 1 << 20_i32] {
             assert_eq!(
                 collect::<M, u128>(grid, &filters, maximum, budget)?,
                 expected[..=maximum],
@@ -134,7 +160,7 @@ fn check<M: Mask>(
 #[test]
 fn every_budget_matches_independent_geometry_with_restricted_orbits()
 -> Result<(), Box<dyn std::error::Error>> {
-    let grid = build_grid_definition(&[3, 3], 0).unwrap();
+    let grid = build_grid_definition(&[3_i32, 3_i32], 0).unwrap();
     check::<u32>(
         &grid,
         vec![
@@ -166,10 +192,10 @@ fn every_budget_matches_independent_geometry_with_restricted_orbits()
 #[test]
 fn free_nodes_and_all_mask_widths_match_brute() -> Result<(), Box<dyn std::error::Error>> {
     check::<u32>(
-        &build_grid_definition(&[2, 3], 2).unwrap(),
+        &build_grid_definition(&[2_i32, 3_i32], 2).unwrap(),
         vec![vec![0, 6, 7], vec![1, 4, 7], vec![2, 5, 6], vec![3, 4]],
     )?;
-    for n in [31usize, 32, 63, 64, 127] {
+    for n in [31_usize, 32, 63, 64, 127] {
         let grid = build_grid_definition(&[i32::try_from(n).unwrap()], 0).unwrap();
         let allowed = vec![vec![0, n - 1], vec![1, n - 2], vec![2, n - 3]];
         if n <= 31 {
@@ -186,7 +212,7 @@ fn free_nodes_and_all_mask_widths_match_brute() -> Result<(), Box<dyn std::error
 #[test]
 fn deterministic_and_impossible_large_filters_need_no_combinatorial_work()
 -> Result<(), Box<dyn std::error::Error>> {
-    let grid = build_grid_definition(&[3, 20], 0).unwrap();
+    let grid = build_grid_definition(&[3_i32, 20_i32], 0).unwrap();
     let filters = VisitFilters::new(60, (0..8).map(|node| vec![node]).collect()).unwrap();
     assert_eq!(
         filtered_table_bytes::<u64, u128>(
@@ -202,7 +228,7 @@ fn deterministic_and_impossible_large_filters_need_no_combinatorial_work()
         collect::<u64, u128>(&grid, &filters, 8, u64::MAX)?,
         vec![1; 9]
     );
-    let grid = build_grid_definition(&[127], 0).unwrap();
+    let grid = build_grid_definition(&[127_i32], 0).unwrap();
     for first in [vec![], vec![0]] {
         let mut allowed = vec![(0..127).collect::<Vec<_>>(); 127];
         allowed[0] = first.clone();
@@ -240,8 +266,8 @@ fn forced_free_prefix_uses_arbitrary_precision_for_its_unrestricted_tail()
     allowed[0] = vec![0];
     allowed[1] = vec![1];
     let filters = VisitFilters::new(40, allowed).unwrap();
-    let factorial = (1u128..=38).fold(BigUint::from(1u128), |value, factor| value * factor);
-    for budget in [0, 1024, 1 << 20, u64::MAX] {
+    let factorial = (1_u128..=38).fold(BigUint::from(1_u128), |value, factor| value * factor);
+    for budget in [0, 1024, 1 << 20_i32, u64::MAX] {
         assert_eq!(
             filtered_table_bytes::<u64, BigUint>(
                 40,
@@ -253,7 +279,7 @@ fn forced_free_prefix_uses_arbitrary_precision_for_its_unrestricted_tail()
             0
         );
         let counts = collect::<u64, BigUint>(&grid, &filters, 40, budget)?;
-        assert_eq!(counts[0..=2], vec![BigUint::from(1u128); 3]);
+        assert_eq!(counts[0..=2], vec![BigUint::from(1_u128); 3]);
         assert_eq!(counts[40], factorial);
     }
     Ok(())
@@ -261,7 +287,7 @@ fn forced_free_prefix_uses_arbitrary_precision_for_its_unrestricted_tail()
 
 #[test]
 fn cancellation_stops_every_filtered_event_without_finalizing_later_lengths() {
-    let grid = build_grid_definition(&[2, 2], 0).unwrap();
+    let grid = build_grid_definition(&[2_i32, 2_i32], 0).unwrap();
     let blocks = compute_blocks::<u32>(&grid);
     for sets in [
         vec![vec![0, 1], vec![2, 3], vec![0, 1]],
@@ -321,7 +347,7 @@ fn filtered_fixed_width_overflow_preserves_the_exact_prefix() {
             count: 1,
         },
     ];
-    let mut count = 1u128;
+    let mut count = 1_u128;
     for length in 2..=40 {
         let Some(next) = count.checked_mul((41 - length) as u128) else {
             break;

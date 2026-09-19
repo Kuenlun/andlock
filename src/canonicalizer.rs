@@ -16,7 +16,19 @@
 
 use crate::grid::GridDefinition;
 
+/// Normalize axis scales and place the closest node to the centroid at the origin.
+///
+/// The grid must satisfy [`GridDefinition::validate`].
+///
+/// # Panics
+/// Panics if an unvalidated grid has inconsistent dimensions or coordinates
+/// whose canonical differences do not fit i32.
 #[must_use]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "Nonempty validated grids have uniform dimensions; i32 differences fit i64 and GCD divisors are positive."
+)]
 pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
     if grid.points.is_empty() {
         return grid.clone();
@@ -61,6 +73,11 @@ pub fn canonicalize(grid: &GridDefinition) -> GridDefinition {
 /// GCD of the pairwise coordinate differences along `axis` (computed against
 /// `points[0]`, which yields the same value), or `1` when the axis is
 /// constant so that division is a no-op.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "The caller supplies a nonempty grid and a valid axis; widened i32 differences fit i64."
+)]
 fn axis_divisor(points: &[Vec<i32>], axis: usize) -> i64 {
     let origin = i64::from(points[0][axis]);
     points
@@ -71,6 +88,10 @@ fn axis_divisor(points: &[Vec<i32>], axis: usize) -> i64 {
 }
 
 /// GCD over non-negative inputs; `gcd(0, x) = x` absorbs zero differences.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Both inputs are nonnegative and the loop excludes a zero divisor."
+)]
 const fn gcd(mut a: i64, mut b: i64) -> i64 {
     while b != 0 {
         let t = b;
@@ -87,6 +108,12 @@ const fn gcd(mut a: i64, mut b: i64) -> i64 {
 /// `(p[axis] - centroid[axis])^2` keeps everything in integers without
 /// changing the ordering. The metric is translation-invariant, which is what
 /// makes the recentring step idempotent.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "Validated grids have at most 127 points with uniform dimensions and bounded coordinates; usize widens exactly to i128."
+)]
 fn centroid_anchor_index(points: &[Vec<i64>]) -> usize {
     let n = points.len() as i128;
     let dim = points.first().map_or(0, Vec::len);
@@ -115,6 +142,10 @@ fn centroid_anchor_index(points: &[Vec<i64>]) -> usize {
 /// # Panics
 /// Panics on unvalidated grids whose coordinate differences leave `i32` —
 /// loudly, rather than silently wrapping into a non-equivalent grid.
+#[expect(
+    clippy::panic,
+    reason = "Reject unvalidated coordinates explicitly rather than silently change the canonical grid."
+)]
 fn to_coord(value: i64) -> i32 {
     i32::try_from(value).unwrap_or_else(|_| {
         panic!("canonical coordinate {value} does not fit i32; validate the grid first")

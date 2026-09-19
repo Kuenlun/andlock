@@ -9,11 +9,11 @@ use std::collections::{HashMap, HashSet};
 use crate::grid::GridDefinition;
 use crate::mask::Mask;
 
-pub fn starting_orbits<M: Mask>(grid: &GridDefinition, blocks: &[M]) -> Vec<(usize, u128)> {
+pub(crate) fn starting_orbits<M: Mask>(grid: &GridDefinition, blocks: &[M]) -> Vec<(usize, u128)> {
     starting_orbits_with(grid, blocks, None)
 }
 
-pub fn starting_orbits_filtered<M: Mask>(
+pub(crate) fn starting_orbits_filtered<M: Mask>(
     grid: &GridDefinition,
     blocks: &[M],
     allowed: &[M],
@@ -21,6 +21,11 @@ pub fn starting_orbits_filtered<M: Mask>(
     starting_orbits_with(grid, blocks, Some(allowed))
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "Validated coordinates are bounded by MAX_COORD, all points share dimensions, and permutations and weights cover at most 127 nodes."
+)]
 fn starting_orbits_with<M: Mask>(
     grid: &GridDefinition,
     blocks: &[M],
@@ -88,7 +93,7 @@ fn starting_orbits_with<M: Mask>(
         permutation.swap(base, node);
         join_verified(&mut parent, blocks, &permutation, allowed);
     }
-    let mut weights = vec![0u128; n];
+    let mut weights = vec![0_u128; n];
     for node in 0..n {
         if allowed.is_some_and(|allowed| {
             allowed
@@ -107,6 +112,11 @@ fn starting_orbits_with<M: Mask>(
         .collect()
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "Axis bounds come from the validated uniform-dimensional grid; differences within MAX_COORD fit i32."
+)]
 fn distinct_active_axes(grid: &GridDefinition, bounds: &[(i32, i32)]) -> Vec<usize> {
     let mut profiles = HashSet::new();
     bounds
@@ -137,6 +147,10 @@ fn map_points(
     Some(permutation)
 }
 
+#[expect(
+    clippy::indexing_slicing,
+    reason = "Union links are initialized from and only assigned existing node indices."
+)]
 fn root(parent: &[usize], mut node: usize) -> usize {
     while parent[node] != node {
         node = parent[node];
@@ -144,6 +158,12 @@ fn root(parent: &[usize], mut node: usize) -> usize {
     node
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "The caller supplies a node permutation and matching n by n matrix; all indices and extracted bits stay below 128."
+)]
 fn join_verified<M: Mask>(
     parent: &mut [usize],
     blocks: &[M],
@@ -190,10 +210,10 @@ mod tests {
     fn repeated_coordinate_profiles_propose_only_one_active_axis() {
         let grid = GridDefinition {
             dimensions: 4096,
-            points: vec![vec![0; 4096], vec![1; 4096], vec![2; 4096]],
+            points: vec![vec![0_i32; 4096], vec![1_i32; 4096], vec![2_i32; 4096]],
             free_points: 0,
         };
-        let bounds = vec![(0, 2); 4096];
+        let bounds = vec![(0_i32, 2_i32); 4096];
         assert_eq!(distinct_active_axes(&grid, &bounds), [0]);
         let blocks = compute_blocks::<u32>(&grid);
         assert_eq!(starting_orbits(&grid, &blocks), [(0, 2), (1, 1)]);

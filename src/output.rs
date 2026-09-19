@@ -21,7 +21,7 @@ const POINTS_LABEL: &str = "Points";
 
 #[derive(Copy, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum RunStatus {
+pub(crate) enum RunStatus {
     Complete,
     Interrupted,
     AllocationFailed,
@@ -30,7 +30,7 @@ pub enum RunStatus {
 }
 
 #[derive(Copy, Clone, Serialize)]
-pub struct LengthRange {
+pub(crate) struct LengthRange {
     pub min_length: usize,
     pub max_length: usize,
 }
@@ -62,7 +62,7 @@ struct JsonReport<'a> {
 
 /// Serializes finalized selected counts without losing integer precision.
 /// An unstarted selected range has no completed range or total.
-pub fn render_json<C: Display>(
+pub(crate) fn render_json<C: Display>(
     grid: &GridDefinition,
     entries: &[(usize, C)],
     requested_range: LengthRange,
@@ -103,7 +103,7 @@ pub fn render_json<C: Display>(
 
 /// `ProgressStyle::with_template(template)`, swapping in `fallback()` on
 /// template parse failure.
-pub fn style_or_default(template: &str, fallback: fn() -> ProgressStyle) -> ProgressStyle {
+pub(crate) fn style_or_default(template: &str, fallback: fn() -> ProgressStyle) -> ProgressStyle {
     ProgressStyle::with_template(template).unwrap_or_else(|_| fallback())
 }
 
@@ -113,7 +113,11 @@ fn row_style() -> ProgressStyle {
 
 /// Render a count for display. `human = true` groups digits with `_`
 /// matching Rust integer-literal syntax (e.g. `140_704`).
-pub fn format_count(count: impl Display, human: bool) -> String {
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "The caller formats decimal counts of at most 215 digits; grouping indices remain inside the string."
+)]
+pub(crate) fn format_count(count: impl Display, human: bool) -> String {
     let raw = count.to_string();
     if !human || raw.len() <= 3 {
         return raw;
@@ -124,7 +128,7 @@ pub fn format_count(count: impl Display, human: bool) -> String {
         if i > 0 && (bytes.len() - i).is_multiple_of(3) {
             out.push('_');
         }
-        out.push(b as char);
+        out.push(char::from(b));
     }
     out
 }
@@ -136,7 +140,7 @@ pub fn format_count(count: impl Display, human: bool) -> String {
 /// A single bar (rather than one per row) keeps the live table atomic from
 /// indicatif's point of view: `MultiProgress::clear` always wipes it whole,
 /// so terminal scroll cannot strand the top of the table in scrollback.
-pub struct LengthPrinter<'a, C = u128> {
+pub(crate) struct LengthPrinter<'a, C = u128> {
     min_length: usize,
     max_length: usize,
     human: bool,
@@ -153,7 +157,7 @@ struct LivePrinter<'a> {
 }
 
 impl<'a, C: Display> LengthPrinter<'a, C> {
-    pub fn new(
+    pub(crate) fn new(
         mp: &'a MultiProgress,
         min_length: usize,
         max_length: usize,
@@ -177,7 +181,7 @@ impl<'a, C: Display> LengthPrinter<'a, C> {
     }
 
     /// Records a finalised `(length, count)` row within the selected range.
-    pub fn print(&mut self, length: usize, count: C) {
+    pub(crate) fn print(&mut self, length: usize, count: C) {
         if length < self.min_length || length > self.max_length {
             return;
         }
@@ -223,7 +227,7 @@ impl<'a, C: Display> LengthPrinter<'a, C> {
     /// `finish_and_clear` skips the redraw an unfinished bar would otherwise
     /// fire from `Drop`, which would repaint the multi-line table after the
     /// caller's `MultiProgress::clear` and strand its top line in scrollback.
-    pub fn finish(mut self) -> Vec<(usize, C)> {
+    pub(crate) fn finish(mut self) -> Vec<(usize, C)> {
         if let Some(LivePrinter { bar: Some(bar), .. }) = self.live.take() {
             bar.finish_and_clear();
         }
@@ -233,7 +237,7 @@ impl<'a, C: Display> LengthPrinter<'a, C> {
 
 /// Final report: the per-length table, the `Total`/`Points` summary, and the
 /// separator width that joins them visually.
-pub struct RenderedReport {
+pub(crate) struct RenderedReport {
     pub table: Vec<String>,
     pub summary: Vec<String>,
     pub separator_width: usize,
@@ -242,7 +246,11 @@ pub struct RenderedReport {
 /// Lay out the table and summary block with every value right-aligned to a
 /// shared column edge. `total_str = None` skips the `Total` row, used when the
 /// total cannot be represented (sum overflowed `u128`).
-pub fn render_final<C: Display>(
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Validated count strings are bounded, and summary padding includes every label before subtracting its width."
+)]
+pub(crate) fn render_final<C: Display>(
     entries: &[(usize, C)],
     human: bool,
     total_str: Option<&str>,
@@ -301,6 +309,10 @@ fn column_width(formatted: &[String]) -> usize {
         .max(COUNT_HEADER.len())
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Reports contain at most 128 pattern lengths plus one header."
+)]
 fn render_table_rows<C>(entries: &[(usize, C)], formatted: &[String], width: usize) -> Vec<String> {
     if entries.is_empty() {
         return Vec::new();
@@ -323,6 +335,10 @@ fn data_row(length: usize, value: &str, width: usize) -> String {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::indexing_slicing,
+        reason = "Test fixtures have fixed shapes; missing expected counts or JSON fields must fail the test."
+    )]
     use num_bigint::BigUint;
 
     use super::*;
@@ -331,7 +347,7 @@ mod tests {
     fn arbitrary_precision_output_preserves_zero_and_large_counts() -> serde_json::Result<()> {
         let mp = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
         let mut printer = LengthPrinter::new(&mp, 2, 3, false, None);
-        let large = BigUint::from(1u128) << 128usize;
+        let large = BigUint::from(1_u128) << 128_usize;
         printer.print(2, BigUint::default());
         printer.print(3, large.clone());
         let entries = printer.finish();

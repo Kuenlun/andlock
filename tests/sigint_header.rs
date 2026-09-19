@@ -2,12 +2,31 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    clippy::indexing_slicing,
+    reason = "Test fixtures have fixed shapes; missing expected counts or JSON fields must fail the test."
+)]
+#![expect(
+    clippy::panic,
+    reason = "Subprocess and event fixtures fail immediately when the expected test protocol is violated."
+)]
+
 //! Interrupt a running count through a PTY and check its final rendered report.
 //! The terminal model must contain one table, a correct subtotal and a matching
 //! interruption footer after the live progress display is cleared.
 
 #![cfg(unix)]
-#![allow(clippy::expect_used, clippy::unwrap_used)]
+#![expect(
+    clippy::expect_used,
+    reason = "PTY fixture setup must abort the test on failure."
+)]
+
+// Cargo shares package dependencies across its library, binary and test targets.
+use {
+    andlock as _, anyhow as _, clap as _, clap_cargo as _, clap_complete as _, console as _,
+    criterion as _, ctrlc as _, indicatif as _, num_bigint as _, parse_size as _, serde as _,
+    serde_json as _, sysinfo as _,
+};
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -59,7 +78,7 @@ fn sigint_renders_coherent_partial_report() {
 
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     let reader_handle = thread::spawn(move || {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0_u8; 4096];
         while let Ok(n) = reader.read(&mut buf) {
             if n == 0 || tx.send(buf[..n].to_vec()).is_err() {
                 break;
@@ -91,7 +110,7 @@ fn sigint_renders_coherent_partial_report() {
     }
 
     writer.write_all(b"\x03").expect("send ctrl+c");
-    writer.flush().ok();
+    let _flush = writer.flush().ok();
     let status = child.wait().expect("wait child");
     drop(writer);
     drop(pty.master);
@@ -99,7 +118,7 @@ fn sigint_renders_coherent_partial_report() {
         parser.process(&chunk);
         raw.extend_from_slice(&chunk);
     }
-    reader_handle.join().ok();
+    let _reader = reader_handle.join().ok();
 
     assert_eq!(
         status.exit_code(),

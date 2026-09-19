@@ -21,10 +21,12 @@ jobs:
         with:
           toolchain: nightly-2026-04-15
           components: rustfmt, clippy, llvm-tools-preview
-      - name: Install lockpick
+      - name: Install external check tools
         uses: taiki-e/install-action@v2
         with:
-          tool: lockpick,cargo-llvm-cov,cargo-machete,cargo-audit,cargo-nextest
+          tool: cargo-llvm-cov,cargo-machete,cargo-audit,cargo-nextest
+      - name: Install Lockpick
+        run: cargo install --git https://github.com/Kuenlun/lockpick --rev 87116062372b37c5a793acb10d662343096c8985 --locked lockpick
       - name: Run checks
         run: lockpick -v
       - name: Test performance comparison helper

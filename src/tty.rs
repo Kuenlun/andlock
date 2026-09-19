@@ -11,20 +11,20 @@ use indicatif::MultiProgress;
 // 128 + SIGINT on Unix. Any non-zero code on Windows that does not collide
 // with Cargo's STATUS_CONTROL_C_EXIT (0xC000013A) banner.
 #[cfg(unix)]
-pub const SIGINT_EXIT_CODE: i32 = 130;
+pub(crate) const SIGINT_EXIT_CODE: i32 = 130;
 #[cfg(not(unix))]
-pub const SIGINT_EXIT_CODE: i32 = 1;
+pub(crate) const SIGINT_EXIT_CODE: i32 = 1;
 
 static CANCELLED: AtomicBool = AtomicBool::new(false);
 
 /// Shared draw target so the Ctrl+C handler can clear every bar at once.
-pub fn progress() -> &'static MultiProgress {
+pub(crate) fn progress() -> &'static MultiProgress {
     static PROGRESS: OnceLock<MultiProgress> = OnceLock::new();
     PROGRESS.get_or_init(MultiProgress::new)
 }
 
 /// Whether SIGINT has been received at least once.
-pub fn is_cancelled() -> bool {
+pub(crate) fn is_cancelled() -> bool {
     CANCELLED.load(Ordering::Relaxed)
 }
 
@@ -34,12 +34,16 @@ pub fn is_cancelled() -> bool {
 ///
 /// # Errors
 /// Surfaces the `ctrlc` error when a handler is already registered.
-pub fn install_handler() -> anyhow::Result<()> {
+#[expect(
+    clippy::exit,
+    reason = "A second SIGINT must terminate immediately even if the counting thread has not unwound."
+)]
+pub(crate) fn install_handler() -> anyhow::Result<()> {
     ctrlc::set_handler(|| {
         if CANCELLED.swap(true, Ordering::SeqCst) {
-            let _ = progress().clear();
-            let _ = console::Term::stderr().show_cursor();
-            let _ = io::stderr().flush();
+            let _cleanup = progress().clear();
+            let _cleanup = console::Term::stderr().show_cursor();
+            let _cleanup = io::stderr().flush();
             std::process::exit(SIGINT_EXIT_CODE);
         }
         compensate_ctrl_c_echo();
@@ -61,6 +65,6 @@ fn compensate_ctrl_c_echo() {
         return;
     }
     let mut err = io::stderr().lock();
-    let _ = err.write_all(b"\x1b[A");
-    let _ = err.flush();
+    let _cleanup = err.write_all(b"\x1b[A");
+    let _cleanup = err.flush();
 }

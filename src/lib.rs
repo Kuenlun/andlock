@@ -37,6 +37,15 @@
 //! # Ok::<(), Box<dyn std::error::Error>>(())
 //! ```
 
+// Cargo shares package dependencies across its library, binary and test targets.
+#[cfg(test)]
+use {criterion as _, portable_pty as _, vt100 as _};
+
+use {
+    anyhow as _, clap as _, clap_cargo as _, clap_complete as _, console as _, ctrlc as _,
+    indicatif as _, parse_size as _, serde_json as _, sysinfo as _,
+};
+
 pub mod canonicalizer;
 pub mod counter;
 pub mod grid;

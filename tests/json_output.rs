@@ -2,7 +2,19 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    clippy::indexing_slicing,
+    reason = "Test fixtures have fixed shapes; missing expected counts or JSON fields must fail the test."
+)]
+
 //! Structured output preserves exact counts and describes partial completion.
+
+// Cargo shares package dependencies across its library, binary and test targets.
+use {
+    andlock as _, clap as _, clap_cargo as _, clap_complete as _, console as _, criterion as _,
+    ctrlc as _, indicatif as _, num_bigint as _, parse_size as _, portable_pty as _, serde as _,
+    sysinfo as _, vt100 as _,
+};
 
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
@@ -22,7 +34,7 @@ fn run(args: &[&str]) -> Result<(Output, Value)> {
 
 #[test]
 fn complete_report_is_one_json_object_with_exact_input_grid() -> Result<()> {
-    let grid = json!({"dimensions": 2, "points": [[2, -3], [6, -3], [6, 5]], "free_points": 1});
+    let grid = json!({"dimensions": 2_i32, "points": [[2_i32, -3_i32], [6_i32, -3_i32], [6_i32, 5_i32]], "free_points": 1_i32});
     let mut child = Command::new(env!("CARGO_BIN_EXE_andlock"))
         .args([
             "--file",
@@ -51,9 +63,9 @@ fn complete_report_is_one_json_object_with_exact_input_grid() -> Result<()> {
         report,
         json!({
             "grid": grid,
-            "requested_range": {"min_length": 1, "max_length": 2},
-            "completed_range": {"min_length": 1, "max_length": 2},
-            "counts": [{"length": 1, "count": "4"}, {"length": 2, "count": "12"}],
+            "requested_range": {"min_length": 1_i32, "max_length": 2_i32},
+            "completed_range": {"min_length": 1_i32, "max_length": 2_i32},
+            "counts": [{"length": 1_i32, "count": "4"}, {"length": 2_i32, "count": "12"}],
             "total": "16",
             "status": "complete"
         })
@@ -90,7 +102,7 @@ fn zero_table_budget_preserves_complete_json_reports() -> Result<()> {
         assert!(reference.status.success() && output.status.success());
         assert_eq!(report, expected);
         assert_eq!(report["status"], "complete");
-        assert_eq!(report["completed_range"]["max_length"], 9);
+        assert_eq!(report["completed_range"]["max_length"], 9_i32);
         assert!(output.stderr.is_empty());
     }
     Ok(())
@@ -100,16 +112,19 @@ fn zero_table_budget_preserves_complete_json_reports() -> Result<()> {
 fn count_overflow_excludes_the_inexact_length() -> Result<()> {
     for minimum in ["0", "31"] {
         let (output, report) = run(&["--free-points", "35", "--min-length", minimum, "-q"])?;
-        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.status.code(), Some(1_i32));
         assert_eq!(report["status"], "count_overflow");
         let counts = report["counts"].as_array().context("counts array")?;
         if minimum == "0" {
             assert_eq!(counts.len(), 31);
             let last: u128 = (6..=35).product();
-            assert_eq!(counts[30], json!({"length": 30, "count": last.to_string()}));
+            assert_eq!(
+                counts[30],
+                json!({"length": 30_i32, "count": last.to_string()})
+            );
             assert_eq!(
                 report["completed_range"],
-                json!({"min_length": 0, "max_length": 30})
+                json!({"min_length": 0_i32, "max_length": 30_i32})
             );
             assert!(report["total"].is_string());
         } else {
@@ -126,15 +141,15 @@ fn count_overflow_excludes_the_inexact_length() -> Result<()> {
 fn total_overflow_preserves_full_precision_rows_and_completed_range() -> Result<()> {
     let (output, report) = run(&["--free-points", "34", "--min-length", "33", "-q"])?;
     let factorial: u128 = (1..=34).product();
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(1_i32));
     assert_eq!(report["status"], "total_overflow");
     assert!(report["total"].is_null());
     assert_eq!(report["completed_range"], report["requested_range"]);
     assert_eq!(
         report["counts"],
         json!([
-            {"length": 33, "count": factorial.to_string()},
-            {"length": 34, "count": factorial.to_string()}
+            {"length": 33_i32, "count": factorial.to_string()},
+            {"length": 34_i32, "count": factorial.to_string()}
         ])
     );
 
@@ -152,10 +167,10 @@ fn empty_grid_contains_a_completed_empty_pattern() -> Result<()> {
     assert_eq!(
         report,
         json!({
-            "grid": {"dimensions": 0, "points": [], "free_points": 0},
-            "requested_range": {"min_length": 0, "max_length": 0},
-            "completed_range": {"min_length": 0, "max_length": 0},
-            "counts": [{"length": 0, "count": "1"}],
+            "grid": {"dimensions": 0_i32, "points": [], "free_points": 0_i32},
+            "requested_range": {"min_length": 0_i32, "max_length": 0_i32},
+            "completed_range": {"min_length": 0_i32, "max_length": 0_i32},
+            "counts": [{"length": 0_i32, "count": "1"}],
             "total": "1",
             "status": "complete"
         })
@@ -169,7 +184,7 @@ fn json_rejects_incompatible_output_modes() -> Result<()> {
         let output = Command::new(env!("CARGO_BIN_EXE_andlock"))
             .args(["3x3", "--json", option])
             .output()?;
-        assert_eq!(output.status.code(), Some(2));
+        assert_eq!(output.status.code(), Some(2_i32));
         assert!(output.stdout.is_empty());
         assert!(std::str::from_utf8(&output.stderr)?.contains("cannot be used with"));
     }
@@ -187,7 +202,7 @@ fn allocation_failure_still_produces_a_structured_report() -> Result<()> {
             "-q",
         ])
         .output()?;
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(1_i32));
     let report: Value = serde_json::from_slice(&output.stdout)?;
     assert_eq!(report["status"], "allocation_failed");
     assert_eq!(report["counts"], json!([]));
@@ -228,14 +243,14 @@ fn interrupted_json_keeps_finalized_counts_and_sigint_exit() -> Result<()> {
             .status()?;
         assert!(signal.success());
         let output = child.wait_with_output()?;
-        stderr.read_to_string(&mut diagnostics)?;
-        assert_eq!(output.status.code(), Some(130), "{diagnostics}");
+        let _bytes = stderr.read_to_string(&mut diagnostics)?;
+        assert_eq!(output.status.code(), Some(130_i32), "{diagnostics}");
         let report: Value = serde_json::from_slice(&output.stdout)?;
         assert_eq!(report["status"], "interrupted");
         let counts = report["counts"].as_array().context("counts array")?;
         if minimum == "0" {
             assert!(!counts.is_empty());
-            let mut sum = 0u128;
+            let mut sum = 0_u128;
             for (length, entry) in counts.iter().enumerate() {
                 assert_eq!(entry["length"], length);
                 sum += entry["count"]
