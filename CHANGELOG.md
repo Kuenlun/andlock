@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1](https://github.com/Kuenlun/andlock/compare/v0.5.0...v0.5.1) - 2026-09-20
+
+### Other
+
+- pin check and release tool versions ([#97](https://github.com/Kuenlun/andlock/pull/97))
+- harden Rust lint checks ([#94](https://github.com/Kuenlun/andlock/pull/94))
+
 ## [0.5.0](https://github.com/Kuenlun/andlock/compare/v0.4.0...v0.5.0) - 2026-09-10
 
 ### Added
