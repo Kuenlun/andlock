@@ -2,6 +2,30 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    unused_crate_dependencies,
+    reason = "Cargo supplies dependencies used by other package targets, beyond those needed by this integration test."
+)]
+
+//! Bounded counting agrees with exhaustive reference enumeration.
+
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "Reference calculations use bounded fixture sizes and values chosen to fit their result types."
+)]
+#![expect(
+    clippy::as_conversions,
+    reason = "Fixture node counts are at most 127 and integer widening preserves the reference values."
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "Test fixtures have fixed shapes; missing expected counts or JSON fields must fail the test."
+)]
+#![expect(
+    clippy::panic,
+    reason = "Subprocess and event fixtures fail immediately when the expected test protocol is violated."
+)]
+
 use std::ops::ControlFlow;
 
 use andlock::counter::DpEvent;
@@ -24,7 +48,7 @@ fn visit(n: usize, blocks: &[u128], seen: u128, last: usize, counts: &mut [u128]
 
 fn geometric_counts(grid: &GridDefinition, limit: usize) -> Vec<u128> {
     let n = grid.node_count();
-    let mut required = vec![0u128; n * n];
+    let mut required = vec![0_u128; n * n];
     // Independent segment test, without the production blocking-matrix builder.
     for (a, p) in grid.points.iter().enumerate() {
         for (b, q) in grid.points.iter().enumerate() {
@@ -84,21 +108,21 @@ fn check<M: Mask>(
 #[test]
 fn every_budget_matches_independent_geometry() -> Result<(), Box<dyn std::error::Error>> {
     let mut grids = vec![
-        build_grid_definition(&[0], 0)?,
-        build_grid_definition(&[3], 0)?,
-        build_grid_definition(&[6], 0)?,
-        build_grid_definition(&[2, 3], 0)?,
-        build_grid_definition(&[3, 3], 0)?,
-        build_grid_definition(&[2, 2, 2], 0)?,
-        build_grid_definition(&[3], 3)?,
-        build_grid_definition(&[0], 7)?,
+        build_grid_definition(&[0_i32], 0)?,
+        build_grid_definition(&[3_i32], 0)?,
+        build_grid_definition(&[6_i32], 0)?,
+        build_grid_definition(&[2_i32, 3_i32], 0)?,
+        build_grid_definition(&[3_i32, 3_i32], 0)?,
+        build_grid_definition(&[2_i32, 2_i32, 2_i32], 0)?,
+        build_grid_definition(&[3_i32], 3)?,
+        build_grid_definition(&[0_i32], 7)?,
     ];
-    for sample in 0..12 {
-        let mut points: Vec<Vec<i32>> = (0..9)
-            .filter(|&i| (i * 7 + sample * 3) % 11 < 8)
-            .map(|i| vec![i % 3, i / 3])
+    for sample in 0_i32..12_i32 {
+        let mut points: Vec<Vec<i32>> = (0_i32..9_i32)
+            .filter(|&i| (i * 7_i32 + sample * 3_i32) % 11_i32 < 8_i32)
+            .map(|i| vec![i % 3_i32, i / 3_i32])
             .collect();
-        if sample % 2 == 0 {
+        if sample % 2_i32 == 0_i32 {
             points.reverse();
         }
         grids.push(GridDefinition {
@@ -121,9 +145,9 @@ fn every_budget_matches_independent_geometry() -> Result<(), Box<dyn std::error:
 
 #[test]
 fn planner_never_exceeds_budget() {
-    for n in [0usize, 1, 2, 7, 15, 31, 32, 60, 63, 64, 90, 126, 127] {
+    for n in [0_usize, 1, 2, 7, 15, 31, 32, 60, 63, 64, 90, 126, 127] {
         for length in [0, n / 2, n.saturating_sub(1), n] {
-            for budget in [0, 32, 1024, 1 << 20, 1 << 30] {
+            for budget in [0, 32, 1024, 1 << 20_i32, 1 << 30_i32] {
                 let plan = count_plan(n, length, budget);
                 assert!(plan.table_bytes <= budget);
                 assert!(plan.prefix_length <= length);
@@ -137,9 +161,9 @@ fn planner_never_exceeds_budget() {
 #[test]
 fn proposed_symmetries_must_preserve_supplied_movement_rules()
 -> Result<(), Box<dyn std::error::Error>> {
-    let grid = build_grid_definition(&[0], 3)?;
-    let mut blocks = [0u128; 9];
-    blocks[1] = 1 << 2;
+    let grid = build_grid_definition(&[0_i32], 3)?;
+    let mut blocks = [0_u128; 9];
+    blocks[1] = 1 << 2_i32;
     let mut counts = Vec::new();
     count_patterns_bounded(&grid, &blocks, 3, 0, |event| {
         if let DpEvent::LengthDone { count, .. } = event {
@@ -153,23 +177,23 @@ fn proposed_symmetries_must_preserve_supplied_movement_rules()
 
 #[test]
 fn cancellation_discards_unfinished_partition_totals() -> Result<(), Box<dyn std::error::Error>> {
-    let grid = build_grid_definition(&[3, 4], 0)?;
+    let grid = build_grid_definition(&[3_i32, 4_i32], 0)?;
     let blocks = compute_blocks::<u32>(&grid);
-    let mut ticks = 0;
+    let mut ticks = 0_i32;
     let mut lengths = Vec::new();
     count_patterns_bounded(&grid, &blocks, 8, 0, |event| {
         match event {
-            DpEvent::Mask => ticks += 1,
+            DpEvent::Mask => ticks += 1_i32,
             DpEvent::LengthDone { length, count } => lengths.push((length, count)),
             DpEvent::Overflow => panic!("unexpected overflow"),
         }
-        if ticks == 40 {
+        if ticks == 40_i32 {
             ControlFlow::Break(())
         } else {
             ControlFlow::Continue(())
         }
     })?;
-    assert_eq!(ticks, 40);
+    assert_eq!(ticks, 40_i32);
     let expected = geometric_counts(&grid, 4);
     assert!(lengths.len() >= 3 && lengths.len() < expected.len());
     assert!(

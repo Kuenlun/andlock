@@ -27,7 +27,7 @@ const MARGIN: &str = "    ";
 
 /// Renders `grid` sized to the current terminal, or `None` to skip silently.
 #[must_use]
-pub fn render_for_terminal(grid: &GridDefinition) -> Option<String> {
+pub(crate) fn render_for_terminal(grid: &GridDefinition) -> Option<String> {
     let max_width = console::Term::stderr()
         .size_checked()
         .map(|(_, cols)| usize::from(cols))
@@ -39,7 +39,7 @@ pub fn render_for_terminal(grid: &GridDefinition) -> Option<String> {
 /// Builds the preview string for `grid` within `max_width` display columns,
 /// or `None` to skip silently.
 #[must_use]
-pub fn render_preview(grid: &GridDefinition, max_width: usize) -> Option<String> {
+pub(crate) fn render_preview(grid: &GridDefinition, max_width: usize) -> Option<String> {
     let n_free = grid.free_points;
     if grid.points.is_empty() {
         return (n_free > 0)
@@ -56,7 +56,8 @@ pub fn render_preview(grid: &GridDefinition, max_width: usize) -> Option<String>
     }
 
     let mut lines: Vec<String> = (0..rows)
-        .map(|r| render_row(cols, &point_set, rows - 1 - r))
+        .rev()
+        .map(|y| render_row(cols, &point_set, y))
         .collect();
     if n_free > 0 {
         attach_free_points(&mut lines, n_free);
@@ -89,8 +90,8 @@ fn project(grid: &GridDefinition) -> (usize, usize, HashSet<(usize, usize)>) {
         .points
         .iter()
         .map(|p| {
-            let x = p.first().copied().unwrap_or(0);
-            let y = if grid.dimensions >= 2 { p[1] } else { 0 };
+            let x = p.first().copied().unwrap_or(0_i32);
+            let y = p.get(1).copied().unwrap_or(0_i32);
             (i64::from(x), i64::from(y))
         })
         .unzip();
@@ -98,7 +99,10 @@ fn project(grid: &GridDefinition) -> (usize, usize, HashSet<(usize, usize)>) {
         let min = values.iter().copied().min().unwrap_or(0);
         let max = values.iter().copied().max().unwrap_or(0);
         // Differences of i32 coordinates: always exact, never negative.
-        (min, usize::try_from(max - min).unwrap_or(usize::MAX))
+        (
+            min,
+            usize::try_from(max.abs_diff(min)).unwrap_or(usize::MAX),
+        )
     };
     let (x_min, x_span) = span(&xs);
     let (y_min, y_span) = span(&ys);
@@ -113,8 +117,8 @@ fn project(grid: &GridDefinition) -> (usize, usize, HashSet<(usize, usize)>) {
         .zip(vs)
         .map(|(&h, &v)| {
             (
-                usize::try_from(h - h_min).unwrap_or(usize::MAX),
-                usize::try_from(v - v_min).unwrap_or(usize::MAX),
+                usize::try_from(h.abs_diff(h_min)).unwrap_or(usize::MAX),
+                usize::try_from(v.abs_diff(v_min)).unwrap_or(usize::MAX),
             )
         })
         .collect();
@@ -122,6 +126,10 @@ fn project(grid: &GridDefinition) -> (usize, usize, HashSet<(usize, usize)>) {
 }
 
 /// Lays out `n` free points as rows of up to [`FREE_ROW_WIDTH`] stars each.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "The nonempty preview is capped at 20 rows and 10 columns before allocation and indexing."
+)]
 fn render_free_block(n: usize, max_width: usize) -> Option<String> {
     let cols = n.min(FREE_ROW_WIDTH);
     let rows = n.div_ceil(FREE_ROW_WIDTH);
@@ -144,6 +152,10 @@ fn render_free_block(n: usize, max_width: usize) -> Option<String> {
     Some(out)
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "The caller has already bounded the column count to the terminal width."
+)]
 fn render_row(cols: usize, point_set: &HashSet<(usize, usize)>, y: usize) -> String {
     let mut row = String::with_capacity(cols * 4);
     for x in 0..cols {
@@ -164,6 +176,10 @@ fn render_row(cols: usize, point_set: &HashSet<(usize, usize)>, y: usize) -> Str
 /// `n_free <= rows.len()`: one star per row, centred vertically. Otherwise
 /// stars fill column by column (top-to-bottom), wrapping into additional
 /// columns on the right.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "The grid has at least one row and at most 127 validated free points."
+)]
 fn attach_free_points(rows: &mut [String], n_free: usize) {
     let grid_rows = rows.len();
     if n_free <= grid_rows {

@@ -2,6 +2,23 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    reason = "Reference calculations use bounded fixture sizes and values chosen to fit their result types."
+)]
+#![expect(
+    clippy::as_conversions,
+    reason = "Fixture node counts are at most 127 and integer widening preserves the reference values."
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "Test fixtures have fixed shapes; missing expected counts or JSON fields must fail the test."
+)]
+#![expect(
+    clippy::panic,
+    reason = "Subprocess and event fixtures fail immediately when the expected test protocol is violated."
+)]
+
 use super::*;
 use crate::grid::{GridDefinition, build_grid_definition, compute_blocks};
 use crate::visits::VisitFilters;
@@ -128,13 +145,13 @@ fn check_grid<M: Mask>(grid: &GridDefinition, max_length: usize) -> TestResult {
 #[test]
 fn geometry_enumeration_matches_all_mask_widths() -> TestResult {
     for (dims, free_points) in [
-        (vec![3], 0),
-        (vec![4], 2),
-        (vec![2, 3], 0),
-        (vec![3, 3], 0),
-        (vec![2, 2, 2], 0),
-        (vec![0], 5),
-        (vec![0], 0),
+        (vec![3_i32], 0),
+        (vec![4_i32], 2),
+        (vec![2_i32, 3_i32], 0),
+        (vec![3_i32, 3_i32], 0),
+        (vec![2_i32, 2_i32, 2_i32], 0),
+        (vec![0_i32], 5),
+        (vec![0_i32], 0),
     ] {
         let grid = build_grid_definition(&dims, free_points)?;
         let n = grid.node_count();
@@ -145,22 +162,22 @@ fn geometry_enumeration_matches_all_mask_widths() -> TestResult {
     let grid = GridDefinition {
         dimensions: 3,
         points: vec![
-            vec![-3, -3, -3],
-            vec![0, 0, 0],
-            vec![3, 3, 3],
-            vec![1, 0, 2],
-            vec![0, 2, 1],
+            vec![-3_i32, -3_i32, -3_i32],
+            vec![0_i32, 0_i32, 0_i32],
+            vec![3_i32, 3_i32, 3_i32],
+            vec![1_i32, 0_i32, 2_i32],
+            vec![0_i32, 2_i32, 1_i32],
         ],
         free_points: 2,
     };
     check_grid::<u32>(&grid, grid.node_count())?;
-    check_grid::<u64>(&build_grid_definition(&[3, 11], 0)?, 3)?;
+    check_grid::<u64>(&build_grid_definition(&[3_i32, 11_i32], 0)?, 3)?;
     check_grid::<u128>(&build_grid_definition(&[3, 22], 0)?, 3)
 }
 
 #[test]
 fn every_requested_length_matches_geometry() -> TestResult {
-    let grid = build_grid_definition(&[3, 3], 0)?;
+    let grid = build_grid_definition(&[3_i32, 3_i32], 0)?;
     let expected = enumerate(&grid, 9, u128::MAX);
     let blocks = compute_blocks::<u32>(&grid);
     for max_length in 0..=9 {
@@ -175,7 +192,7 @@ fn every_requested_length_matches_geometry() -> TestResult {
 
 #[test]
 fn android_reference_counts() -> TestResult {
-    let grid = build_grid_definition(&[3, 3], 0)?;
+    let grid = build_grid_definition(&[3_i32, 3_i32], 0)?;
     let blocks = compute_blocks::<u32>(&grid);
     let mut scratch = DpScratch::allocate(9, &blocks, 9)?;
     assert_eq!(
@@ -187,15 +204,15 @@ fn android_reference_counts() -> TestResult {
 
 #[test]
 fn scratch_reuse_resets_seeds_and_layers() -> TestResult {
-    let grid = build_grid_definition(&[3, 3], 0)?;
+    let grid = build_grid_definition(&[3_i32, 3_i32], 0)?;
     let blocks = compute_blocks::<u32>(&grid);
     let unconstrained = vec![0; 81];
     let mut scratch = DpScratch::allocate_constrained(9, 9)?;
-    for starts in [1, 1 << 4, 0, u32::low_bits(9), 0b10101] {
+    for starts in [1, 1 << 4_i32, 0, u32::low_bits(9), 0b10101] {
         let expected = enumerate(&grid, 9, u128::from(starts));
         assert_eq!(collect(&mut scratch, 9, &blocks, 9, starts), expected);
         let mut permutations = 1;
-        let expected_free: Vec<_> = (0usize..=9)
+        let expected_free: Vec<_> = (0_usize..=9)
             .map(|length| {
                 if length == 1 {
                     permutations = u128::from(starts.count_ones());
@@ -216,7 +233,7 @@ fn scratch_reuse_resets_seeds_and_layers() -> TestResult {
 
 #[test]
 fn widths_are_the_smallest_safe_factorial_widths() {
-    let mut bound = 1u128;
+    let mut bound = 1_u128;
     for p in 1..=35 {
         if p > 1 {
             bound *= (p - 1) as u128;
@@ -251,7 +268,7 @@ fn all_cell_widths_preserve_values_and_neighbors() {
 #[test]
 fn dense_layers_cross_widths_and_both_parities() -> TestResult {
     let n = 15;
-    let mut blocks = vec![0u32; n * n];
+    let mut blocks = vec![0_u32; n * n];
     // A diagonal blocker forces the dense path but cannot block a move to a
     // distinct unvisited node. Every ordering remains valid.
     blocks[0] = 1;
@@ -309,7 +326,7 @@ fn event_record(event: &DpEvent) -> (u8, usize, u128) {
 
 #[test]
 fn cancellation_emits_no_further_events_and_scratch_can_be_reused() -> TestResult {
-    let grid = build_grid_definition(&[3], 0)?;
+    let grid = build_grid_definition(&[3_i32], 0)?;
     let blocks = compute_blocks::<u32>(&grid);
     for matrix in [&blocks, &vec![0; 9]] {
         let mut scratch = DpScratch::allocate(3, matrix, 3)?;
@@ -343,7 +360,7 @@ fn cancellation_emits_no_further_events_and_scratch_can_be_reused() -> TestResul
 #[test]
 fn unconstrained_overflow_stops_after_last_exact_length() -> TestResult {
     let n = 40;
-    let blocks = vec![0u64; n * n];
+    let blocks = vec![0_u64; n * n];
     let mut scratch = DpScratch::allocate(n, &blocks, n)?;
     assert!(scratch.buf.is_empty());
     let mut actual = Vec::new();
@@ -352,7 +369,7 @@ fn unconstrained_overflow_stops_after_last_exact_length() -> TestResult {
         ControlFlow::Continue(())
     });
     let mut expected = vec![(1, 0, 1)];
-    let mut permutations = 1u128;
+    let mut permutations = 1_u128;
     for length in 1..=n {
         let Some(next) = permutations.checked_mul((n - length + 1) as u128) else {
             expected.push((2, 0, 0));
@@ -368,7 +385,7 @@ fn unconstrained_overflow_stops_after_last_exact_length() -> TestResult {
 
 #[test]
 fn layer_overflow_checks_sum_and_final_degree_product() {
-    let blocks = [0u32; 9];
+    let blocks = [0_u32; 9];
     for final_layer in [false, true] {
         let mut next = [0; 96];
         let layer = Layer {
@@ -391,12 +408,12 @@ fn layer_overflow_checks_sum_and_final_degree_product() {
 
 fn check_layer_ranks<const BYTES: usize>(unit: u128) {
     let n = 6;
-    let blocks = vec![0u32; n * n];
+    let blocks = vec![0_u32; n * n];
     for p in [2, 3] {
-        let masks: Vec<u32> = (0u32..1 << n)
+        let masks: Vec<u32> = (0_u32..1 << n)
             .filter(|mask| mask.count_ones() as usize == p)
             .collect();
-        let next_masks: Vec<u32> = (0u32..1 << n)
+        let next_masks: Vec<u32> = (0_u32..1 << n)
             .filter(|mask| mask.count_ones() as usize == p + 1)
             .collect();
         let mut current = vec![0; masks.len() * p * BYTES];
@@ -484,7 +501,7 @@ fn check_filters<M: Mask>(grid: &GridDefinition, filters: &VisitFilters) -> Test
 
 #[test]
 fn filtered_prefixes_and_groups_match_geometry_enumeration() -> TestResult {
-    let grid = build_grid_definition(&[3, 3], 0)?;
+    let grid = build_grid_definition(&[3_i32, 3_i32], 0)?;
     for nodes in [
         vec![],
         vec![vec![]],
@@ -500,7 +517,7 @@ fn filtered_prefixes_and_groups_match_geometry_enumeration() -> TestResult {
         check_filters::<u64>(&grid, &filters)?;
         check_filters::<u128>(&grid, &filters)?;
     }
-    let grid = build_grid_definition(&[4], 2)?;
+    let grid = build_grid_definition(&[4_i32], 2)?;
     check_filters::<u32>(
         &grid,
         &VisitFilters::new(6, vec![vec![4, 5], vec![0, 3], vec![1, 2], vec![4, 5]])?,
@@ -509,17 +526,17 @@ fn filtered_prefixes_and_groups_match_geometry_enumeration() -> TestResult {
 
 #[test]
 fn free_grids_honor_future_filters_and_high_mask_bits() -> TestResult {
-    let grid = build_grid_definition(&[0], 31)?;
+    let grid = build_grid_definition(&[0_i32], 31)?;
     check_filters::<u32>(
         &grid,
         &VisitFilters::new(31, vec![vec![0, 15, 30], vec![1, 16, 29]])?,
     )?;
-    let grid = build_grid_definition(&[0], 63)?;
+    let grid = build_grid_definition(&[0_i32], 63)?;
     check_filters::<u64>(
         &grid,
         &VisitFilters::new(63, vec![vec![0, 31, 62], vec![1, 32, 61]])?,
     )?;
-    let grid = build_grid_definition(&[0], 127)?;
+    let grid = build_grid_definition(&[0_i32], 127)?;
     check_filters::<u128>(
         &grid,
         &VisitFilters::new(127, vec![vec![0, 63, 126], vec![1, 64, 125]])?,
@@ -529,7 +546,7 @@ fn free_grids_honor_future_filters_and_high_mask_bits() -> TestResult {
 #[test]
 fn filtered_allocation_distinguishes_zero_seeds_and_restricted_future() -> TestResult {
     let n = 9;
-    let free = vec![0u32; n * n];
+    let free = vec![0_u32; n * n];
     let full = u32::low_bits(n);
     let mut allowed = vec![full; n];
     allowed[0] = 1;
@@ -558,7 +575,7 @@ fn filtered_allocation_distinguishes_zero_seeds_and_restricted_future() -> TestR
 
 #[test]
 fn filtered_scratch_reuse_resets_changed_visit_sets() -> TestResult {
-    let grid = build_grid_definition(&[3, 3], 0)?;
+    let grid = build_grid_definition(&[3_i32, 3_i32], 0)?;
     let blocks = compute_blocks::<u32>(&grid);
     let mut scratch = DpScratch::allocate_constrained(9, 3)?;
     for visits in [
@@ -579,7 +596,7 @@ fn filtered_scratch_reuse_resets_changed_visit_sets() -> TestResult {
 
 #[test]
 fn filtered_cancellation_stops_at_every_event() -> TestResult {
-    let grid = build_grid_definition(&[3], 0)?;
+    let grid = build_grid_definition(&[3_i32], 0)?;
     let blocks = compute_blocks::<u32>(&grid);
     let allowed = [1, 0b110, 0b101];
     let mut scratch = DpScratch::allocate_filtered(3, &blocks, 3, &allowed)?;
@@ -606,9 +623,9 @@ fn filtered_cancellation_stops_at_every_event() -> TestResult {
 #[test]
 fn future_filters_preserve_width_transitions_and_exact_prefix_counts() -> TestResult {
     let n = 15;
-    let blocks = vec![0u32; n * n];
+    let blocks = vec![0_u32; n * n];
     let mut allowed = vec![u32::low_bits(n); n];
-    allowed[n - 1] = 1 | (1 << 4) | (1 << 8);
+    allowed[n - 1] = 1 | (1 << 4_i32) | (1 << 8_i32);
     let mut scratch = DpScratch::allocate_filtered(n, &blocks, n, &allowed)?;
     let counts = collect_filtered(&mut scratch, n, &blocks, n, &allowed);
     let mut permutations = 1;
@@ -629,7 +646,7 @@ fn future_filters_preserve_width_transitions_and_exact_prefix_counts() -> TestRe
 #[test]
 fn empty_first_visit_needs_no_tables_even_for_the_largest_grid() -> TestResult {
     let n = 127;
-    let mut blocks = vec![0u128; n * n];
+    let mut blocks = vec![0_u128; n * n];
     blocks[0] = 1;
     let mut allowed = vec![u128::low_bits(n); n];
     allowed[0] = 0;

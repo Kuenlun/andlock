@@ -123,7 +123,10 @@ struct Cli {
 }
 
 #[derive(Args, Copy, Clone)]
-#[allow(clippy::struct_excessive_bools)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "Independent command-line switches map directly to independent output choices."
+)]
 struct OutputArgs {
     /// Print the grid as JSON instead of counting.
     ///
@@ -249,7 +252,11 @@ fn resolve_range(range: &RangeArgs, n: usize, visits: Option<usize>) -> Result<(
 ///
 /// # Errors
 /// Propagates parse, I/O, and validation errors to the caller.
-pub fn run() -> Result<()> {
+#[expect(
+    clippy::unreachable,
+    reason = "Clap rejects the mutually exclusive dimension and file arguments before dispatch."
+)]
+pub(crate) fn run() -> Result<()> {
     let cli = Cli::parse();
     if let Some(shell) = cli.completions {
         let mut cmd = Cli::command();
@@ -302,6 +309,11 @@ pub fn run() -> Result<()> {
     run_grid(&grid, cli.range, cli.memory, cli.output, visits.as_ref())
 }
 
+#[expect(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    reason = "The CLI writes exported data to stdout and previews and diagnostics to stderr."
+)]
 fn run_grid(
     grid: &GridDefinition,
     range: RangeArgs,

@@ -2,17 +2,25 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+//! Layered dynamic programming with compact, width-bounded counting cells.
+
 use std::ops::ControlFlow;
 
 use crate::mask::{self, Mask};
 use crate::numeric::count_unconstrained;
 
 /// Progress event emitted by [`count_patterns_dp`].
+#[derive(Debug)]
 pub enum DpEvent {
     /// One outer-loop mask has been processed.
     Mask,
     /// `counts[length]` has received its last contribution and is now final.
-    LengthDone { length: usize, count: u128 },
+    LengthDone {
+        /// Number of visited nodes.
+        length: usize,
+        /// Exact number of patterns at this length.
+        count: u128,
+    },
     /// The next count would not fit in `u128`. The run stops at the last
     /// [`DpEvent::LengthDone`] so no inexact value is ever emitted.
     Overflow,
@@ -26,6 +34,11 @@ pub fn is_unconstrained<M: Mask>(blocks: &[M]) -> bool {
 }
 
 /// Exact `C(n, k)` in `u128`, saturating to `u128::MAX` on overflow.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "Node counts are bounded by 127, k is at most n, divisors are nonzero, and usize widens exactly to u128."
+)]
 fn binomial(n: usize, k: usize) -> u128 {
     if k > n {
         return 0;
@@ -56,6 +69,12 @@ const fn cell_bytes(p: usize) -> usize {
 
 /// Each parity buffer holds only its own layers, with each layer using the
 /// narrowest cells that fit its per-state bound.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "Layers start at one, parity is zero or one, and capacity products saturate after exact widening to u128."
+)]
 fn layer_capacities(n: usize, max_length: usize) -> [u128; 2] {
     let mut capacities = [0; 2];
     for p in 1..max_length.min(n) {
@@ -89,6 +108,10 @@ pub fn dp_table_bytes(n: usize, max_length: usize) -> u64 {
 /// `dp_table_bytes` is non-decreasing in `max_length`, so the fit predicate
 /// is monotone and the threshold is located via binary search.
 #[must_use]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "The binary search stays between one and the supported node count, at most 127."
+)]
 pub fn effective_max_length(n: usize, requested: usize, budget_bytes: u64) -> usize {
     let cap = requested.min(n);
     let (mut lo, mut hi) = (1, cap);
@@ -107,6 +130,7 @@ pub fn effective_max_length(n: usize, requested: usize, budget_bytes: u64) -> us
 
 /// Working set [`count_patterns_dp`] needs to run. Allocation failure is
 /// hoisted into [`DpScratch::allocate`] so the DP body itself is infallible.
+#[derive(Debug)]
 pub struct DpScratch {
     buf: Vec<u8>,
     split: usize,
@@ -149,7 +173,7 @@ impl DpScratch {
         allowed: &[M],
     ) -> Result<Self, std::collections::TryReserveError> {
         validate_visits(n, max_length, allowed);
-        if max_length == 0 || allowed[0] == M::ZERO {
+        if max_length == 0 || allowed.first() == Some(&M::ZERO) {
             return Self::allocate(n, blocks, 0);
         }
         if future_visits_unrestricted(n, max_length, allowed) {
@@ -177,6 +201,11 @@ impl DpScratch {
     }
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "Layer ranks address the allocated buffer and cell widths are one of 1, 2, 4, 8, or 16 bytes."
+)]
 fn read_cell<const BYTES: usize>(buf: &[u8], index: usize) -> u128 {
     let offset = index * BYTES;
     let mut bytes = [0; 16];
@@ -184,6 +213,11 @@ fn read_cell<const BYTES: usize>(buf: &[u8], index: usize) -> u128 {
     u128::from_le_bytes(bytes)
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "Allocated layer bounds validate offsets; the checked total and factorial bound ensure every cell sum fits its width."
+)]
 fn add_cell<const BYTES: usize>(buf: &mut [u8], index: usize, ways: u128) {
     let value = read_cell::<BYTES>(buf, index) + ways;
     let offset = index * BYTES;
@@ -194,6 +228,10 @@ fn add_cell<const BYTES: usize>(buf: &mut [u8], index: usize, ways: u128) {
 
 type ReadCell = fn(&[u8], usize) -> u128;
 
+#[expect(
+    clippy::unreachable,
+    reason = "Only the five widths returned by cell_bytes reach this private dispatcher."
+)]
 const fn cell_reader(bytes: usize) -> ReadCell {
     match bytes {
         1 => read_cell::<1>,
@@ -225,8 +263,12 @@ pub fn dp_mask_ticks(n: usize, max_length: usize) -> u64 {
 /// `BINOM[next][next_off + 1]` and `BINOM[bit_pos[j]][j + 2]`.
 const SLOTS: usize = mask::MAX_POINTS + 3;
 
+#[expect(
+    clippy::indexing_slicing,
+    reason = "The const loops keep i and j inside SLOTS, and the recurrence uses only preceding rows."
+)]
 static BINOM: [[usize; SLOTS]; SLOTS] = {
-    let mut t = [[0usize; SLOTS]; SLOTS];
+    let mut t = [[0_usize; SLOTS]; SLOTS];
     let mut i = 0;
     while i < SLOTS {
         t[i][0] = 1;
@@ -349,6 +391,13 @@ pub(crate) fn count_patterns_seeded<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()
     count_patterns_with_visits(scratch, n, blocks, max_length, starts, None, on_event);
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    clippy::unreachable,
+    reason = "Entry assertions validate matrix and scratch sizes; visit masks are validated and cell_bytes returns only supported widths. Size widening to u128 is exact."
+)]
 fn count_patterns_with_visits<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
     scratch: &mut DpScratch,
     n: usize,
@@ -455,7 +504,7 @@ fn count_patterns_with_visits<M: Mask, F: FnMut(DpEvent) -> ControlFlow<()>>(
             }
             Err(LayerStop::Cancelled) => return,
             Err(LayerStop::Overflow) => {
-                let _ = on_event(DpEvent::Overflow);
+                let _flow = on_event(DpEvent::Overflow);
                 return;
             }
         }
@@ -479,6 +528,12 @@ struct Layer<'a, M> {
 
 /// Cache bit positions and the prefix/suffix sums used to rank a successor mask.
 #[inline]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "Positions are below 128 and SLOTS includes the rank margins; ranks fit the layer allocation checked before counting."
+)]
 fn colex_sums<M: Mask>(
     mask: M,
     bit_pos: &mut [u32; SLOTS],
@@ -486,7 +541,7 @@ fn colex_sums<M: Mask>(
     suffix_sum: &mut [usize; SLOTS],
 ) {
     let mut tmp = mask;
-    let mut i = 0usize;
+    let mut i = 0_usize;
     while tmp != M::ZERO {
         let bit = tmp & tmp.wrapping_neg();
         let pos = bit.trailing_zeros();
@@ -502,6 +557,12 @@ fn colex_sums<M: Mask>(
 }
 
 impl<M: Mask> Layer<'_, M> {
+    #[expect(
+        clippy::arithmetic_side_effects,
+        clippy::as_conversions,
+        clippy::indexing_slicing,
+        reason = "The caller validates n, layers and masks. Colex ranks address allocated cells, positions fit usize, and all count contributions use checked arithmetic."
+    )]
     fn count<const NEXT_BYTES: usize, F: FnMut(DpEvent) -> ControlFlow<()>>(
         self,
         read_current: ReadCell,
@@ -516,10 +577,10 @@ impl<M: Mask> Layer<'_, M> {
             next: dp_next,
         } = self;
         let next_p = p + 1;
-        let mut prefix_sum = [0usize; SLOTS];
-        let mut suffix_sum = [0usize; SLOTS];
-        let mut bit_pos = [0u32; SLOTS];
-        let mut free_meta = [(0usize, 0usize); SLOTS];
+        let mut prefix_sum = [0_usize; SLOTS];
+        let mut suffix_sum = [0_usize; SLOTS];
+        let mut bit_pos = [0_u32; SLOTS];
+        let mut free_meta = [(0_usize, 0_usize); SLOTS];
         if NEXT_BYTES != 0 {
             let next_len = usize::try_from(
                 binomial(n, next_p)
@@ -545,7 +606,7 @@ impl<M: Mask> Layer<'_, M> {
             }
 
             // Hoist per-next colex arithmetic out of the endpoint loop.
-            let mut nfree = 0usize;
+            let mut nfree = 0_usize;
             let mut free = !mask & allowed;
             while free != M::ZERO {
                 let next_bit = free & free.wrapping_neg();

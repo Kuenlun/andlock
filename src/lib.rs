@@ -2,6 +2,11 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    unused_crate_dependencies,
+    reason = "Cargo supplies executable and test dependencies that this library does not use."
+)]
+
 //! Counting core for Android-style unlock patterns on n-dimensional grids.
 //!
 //! A pattern is an ordered sequence of distinct nodes; a move is legal once

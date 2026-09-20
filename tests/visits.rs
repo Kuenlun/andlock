@@ -2,6 +2,15 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    unused_crate_dependencies,
+    reason = "Cargo supplies dependencies used by other package targets, beyond those needed by this integration test."
+)]
+#![expect(
+    clippy::indexing_slicing,
+    reason = "Test fixtures have fixed shapes; missing expected counts or JSON fields must fail the test."
+)]
+
 //! Visit filters constrain ordered prefixes and remain reproducible in JSON.
 
 use std::io::Write;
@@ -63,10 +72,10 @@ fn counts(report: &Value) -> Result<Vec<u128>> {
 fn grouped_visits_normalize_and_define_the_default_range() -> Result<()> {
     let output = run(&["3x3"], "[[0,0],[1],[3,2,3]]")?;
     let report = report(&output)?;
-    assert_eq!(report["visits"], json!([[0], [1], [2, 3]]));
+    assert_eq!(report["visits"], json!([[0_i32], [1_i32], [2_i32, 3_i32]]));
     assert_eq!(
         report["requested_range"],
-        json!({"min_length": 0, "max_length": 3})
+        json!({"min_length": 0_i32, "max_length": 3_i32})
     );
     assert_eq!(report["completed_range"], report["requested_range"]);
     assert_eq!(counts(&report)?, [1, 1, 1, 2]);
@@ -109,8 +118,8 @@ fn explicit_ranges_apply_only_the_selected_filter_prefix() -> Result<()> {
         "[[0],[1],[2,3]]",
     )?;
     let report = report(&output)?;
-    assert_eq!(report["counts"], json!([{"length": 2, "count": "1"}]));
-    assert_eq!(report["visits"], json!([[0], [1], [2, 3]]));
+    assert_eq!(report["counts"], json!([{"length": 2_i32, "count": "1"}]));
+    assert_eq!(report["visits"], json!([[0_i32], [1_i32], [2_i32, 3_i32]]));
     Ok(())
 }
 
@@ -125,7 +134,7 @@ fn invalid_visit_json_nodes_and_lengths_fail_before_counting() -> Result<()> {
         "[[],[],[],[],[],[],[],[],[],[]]",
     ] {
         let output = run(&["3x3"], visits)?;
-        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.status.code(), Some(1_i32));
         assert!(output.stdout.is_empty());
         assert!(String::from_utf8_lossy(&output.stderr).contains("visits"));
     }
@@ -135,7 +144,7 @@ fn invalid_visit_json_nodes_and_lengths_fail_before_counting() -> Result<()> {
         vec!["3x3", "--min-length", "3", "--max-length", "2"],
     ] {
         let output = run(&args, "[[0],[1],[2]]")?;
-        assert_eq!(output.status.code(), Some(1));
+        assert_eq!(output.status.code(), Some(1_i32));
         assert!(output.stdout.is_empty());
     }
     Ok(())
@@ -149,7 +158,7 @@ fn grid_stdin_and_visit_file_can_be_combined() -> Result<()> {
         grid,
     )?;
     let report = report(&output)?;
-    assert_eq!(report["visits"], json!([[0], [1], [2, 3]]));
+    assert_eq!(report["visits"], json!([[0_i32], [1_i32], [2_i32, 3_i32]]));
     assert_eq!(counts(&report)?, [1, 1, 1, 2]);
     Ok(())
 }
@@ -167,13 +176,13 @@ fn two_stdin_sources_are_rejected_without_waiting_for_input() -> Result<()> {
     while child.try_wait()?.is_none() {
         if Instant::now() >= deadline {
             child.kill()?;
-            child.wait()?;
+            let _status = child.wait()?;
             bail!("conflicting stdin sources waited for input");
         }
         thread::sleep(Duration::from_millis(10));
     }
     let output = child.wait_with_output()?;
-    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(output.status.code(), Some(1_i32));
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("cannot both read from stdin"));
     Ok(())
@@ -184,7 +193,7 @@ fn visit_filters_conflict_with_grid_export() -> Result<()> {
     let output = Command::new(env!("CARGO_BIN_EXE_andlock"))
         .args(["3x3", "--visits", VISITS_FILE, "--export-json"])
         .output()?;
-    assert_eq!(output.status.code(), Some(2));
+    assert_eq!(output.status.code(), Some(2_i32));
     assert!(output.stdout.is_empty());
     Ok(())
 }
@@ -207,7 +216,7 @@ fn memory_budgets_and_precision_preserve_filtered_json_results() -> Result<()> {
 
 #[test]
 fn arbitrary_precision_counts_the_unrestricted_tail_after_a_fixed_prefix() -> Result<()> {
-    let mut visits = vec![(0usize..40).collect::<Vec<_>>(); 40];
+    let mut visits = vec![(0_usize..40).collect::<Vec<_>>(); 40];
     visits[0] = vec![0];
     visits[1] = vec![1];
     let encoded = serde_json::to_string(&visits)?;
@@ -224,12 +233,15 @@ fn arbitrary_precision_counts_the_unrestricted_tail_after_a_fixed_prefix() -> Re
         &encoded,
     )?;
     let report = report(&output)?;
-    let expected = (1u128..=38)
-        .fold(num_bigint::BigUint::from(1u128), |value, factor| {
+    let expected = (1_u128..=38)
+        .fold(num_bigint::BigUint::from(1_u128), |value, factor| {
             value * factor
         })
         .to_string();
-    assert_eq!(report["counts"], json!([{"length":40,"count":expected}]));
+    assert_eq!(
+        report["counts"],
+        json!([{"length":40_i32,"count":expected}])
+    );
     assert_eq!(report["total"], expected);
     assert_eq!(report["status"], "complete");
     Ok(())

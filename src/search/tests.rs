@@ -6,9 +6,9 @@ use super::*;
 
 #[test]
 fn weighted_accumulation_never_emits_wrapped_counts() -> Result<(), TryReserveError> {
-    for tail_length in [1usize, 2] {
+    for tail_length in [1_usize, 2] {
         for multiply in [false, true] {
-            let blocks = [0u128; 16];
+            let blocks = [0_u128; 16];
             let mut counter = PrefixCounter {
                 allowed: None,
                 n: 4,
@@ -16,7 +16,7 @@ fn weighted_accumulation_never_emits_wrapped_counts() -> Result<(), TryReserveEr
                 full_mask: 15,
                 prefix_length: 1,
                 tail_length,
-                count: if multiply { 0u128 } else { u128::MAX },
+                count: if multiply { 0_u128 } else { u128::MAX },
                 scratch: DpScratch::allocate_constrained(3, tail_length)?,
                 reduced: vec![0; 9],
                 on_event: |_| ControlFlow::Continue(()),
@@ -33,17 +33,17 @@ fn weighted_accumulation_never_emits_wrapped_counts() -> Result<(), TryReserveEr
 
 #[test]
 fn seeded_overflow_never_finalizes_a_partial_target() -> Result<(), TryReserveError> {
-    for weight in [1u128, 41] {
-        let blocks = vec![0u128; 41 * 41];
-        let reduced = vec![0u128; 40 * 40];
+    for weight in [1_u128, 41] {
+        let blocks = vec![0_u128; 41 * 41];
+        let reduced = vec![0_u128; 40 * 40];
         let mut counter = PrefixCounter {
             allowed: None,
             n: 41,
             blocks: &blocks,
-            full_mask: (1u128 << 41) - 1,
+            full_mask: (1_u128 << 41_i32) - 1,
             prefix_length: 1,
             tail_length: 40,
-            count: 7u128,
+            count: 7_u128,
             scratch: DpScratch::allocate(40, &reduced, 40)?,
             reduced,
             on_event: |_| ControlFlow::Continue(()),
@@ -60,8 +60,8 @@ fn seeded_overflow_never_finalizes_a_partial_target() -> Result<(), TryReserveEr
 
 #[test]
 fn big_targets_accumulate_weighted_continuations_beyond_u128() -> Result<(), TryReserveError> {
-    for (tail_length, continuations) in [(1usize, 3u32), (2, 6)] {
-        let blocks = [0u128; 16];
+    for (tail_length, continuations) in [(1_usize, 3_u32), (2, 6)] {
+        let blocks = [0_u128; 16];
         let mut counter = PrefixCounter {
             allowed: None,
             n: 4,
@@ -91,7 +91,7 @@ fn big_targets_accumulate_weighted_continuations_beyond_u128() -> Result<(), Try
 fn big_plans_bound_every_seeded_count_and_choose_the_shortest_fitting_prefix() {
     for n in 0..=MAX_POINTS {
         for length in 0..=n {
-            for budget in [0, 128, 1 << 20, u64::MAX] {
+            for budget in [0, 128, 1 << 20_i32, u64::MAX] {
                 let plan = count_plan_with::<BigUint>(n, length, budget);
                 assert!(plan.table_bytes <= budget);
                 assert!(local_counts_fit(

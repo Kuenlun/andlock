@@ -23,6 +23,10 @@ impl VisitFilters {
     /// # Errors
     /// Rejects unsupported node counts, more visits than nodes, or an index
     /// outside the grid. Empty sets and an empty list of visits are valid.
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "The visit count is checked against the maximum of 127 before converting indices to one-based labels."
+    )]
     pub fn new(node_count: usize, mut allowed: Vec<Vec<usize>>) -> Result<Self, String> {
         if node_count > MAX_POINTS {
             return Err(format!(

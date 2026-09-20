@@ -2,6 +2,18 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    unused_crate_dependencies,
+    reason = "Cargo supplies dependencies used by other package targets, beyond those needed by this integration test."
+)]
+
+//! CLI previews preserve zero-dimensional grid counts.
+
+#![expect(
+    clippy::indexing_slicing,
+    reason = "Test fixtures have fixed shapes; missing expected counts or JSON fields must fail the test."
+)]
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -10,14 +22,14 @@ use serde_json::{Value, json};
 
 #[test]
 fn zero_dimensional_preview_preserves_counts() -> Result<()> {
-    for free_points in [0, 2] {
-        let grid = json!({"dimensions": 0, "points": [[]], "free_points": free_points});
+    for free_points in [0_i32, 2_i32] {
+        let grid = json!({"dimensions": 0_i32, "points": [[]], "free_points": free_points});
         let mut expected = None;
         for quiet in [false, true] {
             let mut command = Command::new(env!("CARGO_BIN_EXE_andlock"));
-            command.args(["--file", "-", "--json"]);
+            let _command = command.args(["--file", "-", "--json"]);
             if quiet {
-                command.arg("--quiet");
+                let _command = command.arg("--quiet");
             }
             let mut child = command
                 .env("NO_COLOR", "1")
@@ -34,7 +46,10 @@ fn zero_dimensional_preview_preserves_counts() -> Result<()> {
             assert!(output.status.success(), "{:?}", output.stderr);
             let report: Value = serde_json::from_slice(&output.stdout)?;
             assert_eq!(report["status"], "complete");
-            assert_eq!(report["total"], if free_points == 0 { "2" } else { "16" });
+            assert_eq!(
+                report["total"],
+                if free_points == 0_i32 { "2" } else { "16" }
+            );
             if let Some(reference) = &expected {
                 assert_eq!(&output.stdout, reference);
             }

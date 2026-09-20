@@ -46,6 +46,11 @@ pub fn count_plan(n: usize, max_length: usize, budget: u64) -> CountPlan {
 /// # Panics
 /// Panics when `max_length > n` or `n > MAX_POINTS`.
 #[must_use]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::unreachable,
+    reason = "The assertion bounds prefix lengths by n <= 127; the full prefix always has a zero-byte continuation."
+)]
 pub fn count_plan_with<C: GlobalCount>(n: usize, max_length: usize, budget: u64) -> CountPlan {
     assert!(max_length <= n && n <= MAX_POINTS);
     for prefix_length in 0..=max_length {
@@ -156,6 +161,10 @@ pub fn count_patterns_bounded_filtered<
     count_with_filters(grid, blocks, max_length, budget, Some(allowed), on_event)
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Validated lengths and matrix dimensions are at most the supported 127 nodes."
+)]
 fn count_with_filters<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>(
     grid: &GridDefinition,
     blocks: &[M],
@@ -195,6 +204,12 @@ struct FixedPrefix<M> {
     active_length: usize,
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "The caller validates the n by n matrix and visit masks; extracted bit positions stay below 128."
+)]
 fn fixed_prefix<M: Mask>(
     n: usize,
     blocks: &[M],
@@ -237,6 +252,11 @@ fn fixed_prefix<M: Mask>(
     prefix
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "Validated visits and lengths bound every prefix, slice and reduced matrix to at most 127 nodes."
+)]
 fn count_active<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>(
     grid: &GridDefinition,
     blocks: &[M],
@@ -278,7 +298,7 @@ fn count_active<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<
                         length: length + forced,
                         count,
                     }),
-                    other => on_event(other),
+                    other @ (CountEvent::Mask | CountEvent::Overflow) => on_event(other),
                 },
             );
             return Ok(());
@@ -330,7 +350,7 @@ fn count_active<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<
             }
         }
         if counter.overflow {
-            let _ = (counter.on_event)(CountEvent::Overflow);
+            let _flow = (counter.on_event)(CountEvent::Overflow);
             return Ok(());
         }
         if (counter.on_event)(CountEvent::LengthDone {
@@ -346,6 +366,12 @@ fn count_active<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<
 }
 
 /// Return the number of legal first moves when every later move is unrestricted.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::indexing_slicing,
+    reason = "The caller passes an unfinished validated prefix; bit positions and the legal degree are bounded by 127 nodes."
+)]
 fn free_tail_starts<M: Mask>(
     n: usize,
     blocks: &[M],
@@ -361,7 +387,7 @@ fn free_tail_starts<M: Mask>(
         return None;
     }
     let mut origins = free;
-    let mut starts = 0u128;
+    let mut starts = 0_u128;
     while origins != M::ZERO {
         let bit = origins & origins.wrapping_neg();
         origins ^= bit;
@@ -390,6 +416,10 @@ fn free_tail_starts<M: Mask>(
 /// # Panics
 /// Panics for an invalid block matrix, visit mask, or requested length.
 #[must_use]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "Validated lengths are bounded by n <= 127 and every plan prefix is at most its requested length."
+)]
 pub fn filtered_table_bytes<M: Mask, C: GlobalCount>(
     n: usize,
     blocks: &[M],
@@ -415,6 +445,11 @@ pub fn filtered_table_bytes<M: Mask, C: GlobalCount>(
 }
 
 /// Return the last direct length when partitioned continuations are still needed.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "The validated node count widens exactly to u128; a zero-length local count always fits, ending the decrement loop."
+)]
 fn count_direct<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>(
     n: usize,
     blocks: &[M],
@@ -486,6 +521,12 @@ struct PrefixCounter<'a, M, C, F> {
 impl<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>
     PrefixCounter<'_, M, C, F>
 {
+    #[expect(
+        clippy::arithmetic_side_effects,
+        clippy::as_conversions,
+        clippy::indexing_slicing,
+        reason = "Prefix traversal stays within validated visit masks and the n by n matrix, with bit positions below 128."
+    )]
     fn visit(&mut self, visited: M, last: usize, length: usize, weight: u128) {
         if self.cancelled || self.overflow {
             return;
@@ -512,6 +553,12 @@ impl<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>
         }
     }
 
+    #[expect(
+        clippy::arithmetic_side_effects,
+        clippy::as_conversions,
+        clippy::indexing_slicing,
+        reason = "The prefix is unfinished and validated; each legal successor is one of at most 127 nodes."
+    )]
     fn legal_degree(&self, visited: M, last: usize) -> u128 {
         let mut free = self
             .allowed
@@ -529,6 +576,12 @@ impl<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>
         degree
     }
 
+    #[expect(
+        clippy::arithmetic_side_effects,
+        clippy::as_conversions,
+        clippy::indexing_slicing,
+        reason = "Validated prefix and tail lengths bound the node maps, reduced matrices and visit slices; extracted positions are below 128."
+    )]
     fn continue_prefix(&mut self, visited: M, last: usize, weight: u128) {
         if self.tail_length == 1 {
             self.overflow = !self
@@ -537,8 +590,8 @@ impl<M: Mask, C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>
             return;
         }
         let remaining = self.n - self.prefix_length;
-        let mut nodes = [0usize; MAX_POINTS];
-        let mut inverse = [0usize; MAX_POINTS];
+        let mut nodes = [0_usize; MAX_POINTS];
+        let mut inverse = [0_usize; MAX_POINTS];
         let mut free = self.full_mask & !visited;
         let mut position = 0;
         let mut starts = M::ZERO;

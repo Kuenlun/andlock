@@ -52,6 +52,10 @@ impl GlobalCount for u128 {
     }
 }
 
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "BigUint addition and multiplication grow the representation instead of overflowing."
+)]
 impl GlobalCount for BigUint {
     const ARBITRARY_PRECISION: bool = true;
 
@@ -75,7 +79,12 @@ pub enum CountEvent<C> {
     /// A state or prefix has been processed.
     Mask,
     /// Every contribution to this length has been counted.
-    LengthDone { length: usize, count: C },
+    LengthDone {
+        /// Number of visited nodes.
+        length: usize,
+        /// Exact number of patterns at this length.
+        count: C,
+    },
     /// The next count cannot be represented. Already emitted counts remain exact.
     Overflow,
 }
@@ -111,9 +120,14 @@ impl From<CountEvent<u128>> for DpEvent {
 /// # Panics
 /// Panics when `max_length > n` or `n > MAX_POINTS`.
 #[must_use]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "The assertion bounds both lengths to 127; offset is below n and widening usize to u128 is exact."
+)]
 pub fn local_counts_fit(n: usize, max_length: usize) -> bool {
     assert!(max_length <= n && n <= MAX_POINTS);
-    let mut bound = 1u128;
+    let mut bound = 1_u128;
     for offset in 0..max_length {
         let Some(next) = bound.checked_mul((n - offset) as u128) else {
             return false;
@@ -124,6 +138,11 @@ pub fn local_counts_fit(n: usize, max_length: usize) -> bool {
 }
 
 /// Shared recurrence for a grid where every move is legal.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    reason = "Validated lengths are at most n <= 127; permutation factors widen exactly and multiplication reports overflow."
+)]
 pub(crate) fn count_unconstrained<C: GlobalCount, F: FnMut(CountEvent<C>) -> ControlFlow<()>>(
     n: usize,
     max_length: usize,
@@ -142,7 +161,7 @@ pub(crate) fn count_unconstrained<C: GlobalCount, F: FnMut(CountEvent<C>) -> Con
     for length in 1..=max_length {
         let factor = if length == 1 { 1 } else { n - length + 1 };
         let Some(next) = count.checked_mul(factor as u128) else {
-            let _ = on_event(CountEvent::Overflow);
+            let _flow = on_event(CountEvent::Overflow);
             return;
         };
         count = next;
@@ -163,7 +182,7 @@ mod tests {
 
     #[test]
     fn weighted_fixed_count_checks_product_and_total_without_mutation() {
-        let mut count = 7u128;
+        let mut count = 7_u128;
         assert!(!count.add_scaled(u128::MAX, 2));
         assert_eq!(count, 7);
         assert!(!count.add_scaled(u128::MAX, 1));
@@ -174,14 +193,14 @@ mod tests {
 
     #[test]
     fn arbitrary_precision_weighting_does_not_overflow_an_intermediate_product() {
-        let mut count = BigUint::from(7u128);
+        let mut count = BigUint::from(7_u128);
         assert!(count.add_scaled(u128::MAX, 127));
-        let expected = (BigUint::from(1u128) << 128) * 127u32 - 120u32;
+        let expected = (BigUint::from(1_u128) << 128_i32) * 127_u32 - 120_u32;
         assert_eq!(count, expected);
         assert!(GlobalCount::checked_add(&u128::MAX, &1).is_none());
         assert_eq!(
-            GlobalCount::checked_add(&BigUint::from(u128::MAX), &BigUint::from(1u128)),
-            Some(BigUint::from(1u128) << 128)
+            GlobalCount::checked_add(&BigUint::from(u128::MAX), &BigUint::from(1_u128)),
+            Some(BigUint::from(1_u128) << 128_i32)
         );
     }
 
@@ -201,7 +220,7 @@ mod tests {
 
     #[test]
     fn maximum_grid_bounds_count_and_total_payloads() {
-        let mut count = BigUint::from(1u128);
+        let mut count = BigUint::from(1_u128);
         let mut total = count.clone();
         for factor in (1..=MAX_POINTS).rev() {
             count *= factor;

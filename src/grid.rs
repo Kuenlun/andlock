@@ -24,11 +24,14 @@ pub const MAX_COORD: i32 = (1 << 30) - 1;
 /// Finite set of integer-coordinate base nodes in `dimensions`-dimensional
 /// space, optionally accompanied by `free_points` isolated nodes that sit on
 /// no line and never block any move.
-#[derive(Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GridDefinition {
+    /// Number of coordinate axes in every base point.
     pub dimensions: usize,
+    /// Base-node coordinates, indexed in input order.
     pub points: Vec<Vec<i32>>,
+    /// Isolated extra nodes that never block a move.
     #[serde(default)]
     pub free_points: usize,
 }
@@ -95,6 +98,11 @@ impl GridDefinition {
 /// Panics if `grid.node_count() > M::MAX_POINTS`. Pick `M` via
 /// [`crate::mask::smallest_for`].
 #[must_use]
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    reason = "Node indices stay below the asserted mask width; valid points share dimensions and i32 coordinate products fit the widened i128 intermediates."
+)]
 pub fn compute_blocks<M: Mask>(grid: &GridDefinition) -> Vec<M> {
     let n_base = grid.points.len();
     let n = grid.node_count();
@@ -181,7 +189,7 @@ pub fn parse_dims(spec: &str) -> Result<Vec<i32>, String> {
                     format!("invalid dimension component '{part}': expected a non-negative integer")
                 }
             })?;
-            if value < 0 {
+            if value < 0_i32 {
                 return Err(format!(
                     "invalid dimension component '{part}': must be >= 0"
                 ));
@@ -196,10 +204,10 @@ fn generate_grid_points(dims: &[i32]) -> Vec<Vec<i32>> {
     fn recurse(dims: &[i32], current: &mut Vec<i32>, out: &mut Vec<Vec<i32>>) {
         match dims.split_first() {
             Some((&head, tail)) => {
-                for i in 0..head {
+                for i in 0_i32..head {
                     current.push(i);
                     recurse(tail, current, out);
-                    current.pop();
+                    let _coordinate = current.pop();
                 }
             }
             None => out.push(current.clone()),
@@ -219,10 +227,14 @@ fn generate_grid_points(dims: &[i32]) -> Vec<Vec<i32>> {
 /// points would exceed [`MAX_POINTS`] nodes. The count is checked before any
 /// point is materialised, so absurd axis sizes fail fast instead of
 /// exhausting memory.
+#[expect(
+    clippy::as_conversions,
+    reason = "usize values widen exactly to u128 before saturating size checks."
+)]
 pub fn build_grid_definition(dims: &[i32], free_points: usize) -> Result<GridDefinition, String> {
     let base = dims
         .iter()
-        .try_fold(1u128, |acc, &d| {
+        .try_fold(1_u128, |acc, &d| {
             u128::try_from(d).ok().map(|d| acc.saturating_mul(d))
         })
         .ok_or("axis sizes must be non-negative")?;

@@ -33,13 +33,13 @@ use crate::output::{
 use crate::tty;
 
 #[derive(Copy, Clone)]
-pub enum Precision {
+pub(crate) enum Precision {
     Fixed,
     Arbitrary,
 }
 
 #[derive(Copy, Clone)]
-pub struct RunOptions<'a> {
+pub(crate) struct RunOptions<'a> {
     pub min_length: usize,
     pub max_length: usize,
     pub memory_limit: Option<u64>,
@@ -76,13 +76,17 @@ fn bar_style() -> ProgressStyle {
 /// Panics if `grid.node_count() > mask::MAX_POINTS`. The CLI calls
 /// [`GridDefinition::validate`](andlock::grid::GridDefinition::validate)
 /// upstream, which rejects oversized grids with a user-facing error.
-pub fn run_pipeline(grid: &GridDefinition, opts: RunOptions<'_>) -> Result<()> {
+pub(crate) fn run_pipeline(grid: &GridDefinition, opts: RunOptions<'_>) -> Result<()> {
     match opts.precision {
         Precision::Fixed => run_with_count::<u128>(grid, opts),
         Precision::Arbitrary => run_with_count::<BigUint>(grid, opts),
     }
 }
 
+#[expect(
+    clippy::panic,
+    reason = "The CLI validates the grid before dispatch; an unsupported mask width violates that internal contract."
+)]
 fn run_with_count<C: GlobalCount>(grid: &GridDefinition, opts: RunOptions<'_>) -> Result<()> {
     let n = grid.node_count();
     let mp = tty::progress();
@@ -231,6 +235,10 @@ fn run_dp_sequence<M: Mask, C: GlobalCount>(
     }
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "Count overflow must be reported on the CLI diagnostic stream."
+)]
 fn print_overflow_warning(last_exact: usize) {
     let warn = style("warning:").yellow().bold();
     eprintln!(
@@ -238,6 +246,10 @@ fn print_overflow_warning(last_exact: usize) {
     );
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "An omitted total must be explained on the CLI diagnostic stream."
+)]
 fn print_total_overflow_warning() {
     let warn = style("warning:").yellow().bold();
     eprintln!(
@@ -308,6 +320,10 @@ struct CountProgress {
 /// progress bar in lockstep. The closure breaks on SIGINT so the DP can yield
 /// its partial state. Returns the last finalised length and whether the next
 /// count overflowed `u128`.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "flushed never exceeds the saturating tick counter, and pattern lengths are bounded by 127."
+)]
 fn drive_dp<M: Mask, C: GlobalCount>(
     grid: &GridDefinition,
     blocks: &[M],
@@ -371,6 +387,10 @@ fn drive_dp<M: Mask, C: GlobalCount>(
 
 /// Prints a JSON report or the per-length table and `Total`/`Points` summary.
 /// Totals cover finalized selected entries, including partial runs.
+#[expect(
+    clippy::print_stdout,
+    reason = "This function owns the final CLI report stream."
+)]
 fn print_report<C: GlobalCount>(
     outcome: &DpRunOutcome<C>,
     grid: &GridDefinition,
@@ -423,6 +443,10 @@ fn print_report<C: GlobalCount>(
     Ok(())
 }
 
+#[expect(
+    clippy::print_stderr,
+    reason = "Timing and interruption diagnostics belong on stderr."
+)]
 fn print_footer<C>(outcome: &DpRunOutcome<C>, opts: RunOptions<'_>) {
     let elapsed = outcome.elapsed;
     if outcome.status == RunStatus::Interrupted {
@@ -457,8 +481,8 @@ mod tests {
         let mp = MultiProgress::with_draw_target(indicatif::ProgressDrawTarget::hidden());
         let mut printer = LengthPrinter::new(&mp, 2, 2, false, None);
         // Each move requires its unvisited destination, so length 2 has no patterns.
-        let blocks = [0u32, 2, 1, 0];
-        let grid = andlock::grid::build_grid_definition(&[2], 0).map_err(anyhow::Error::msg)?;
+        let blocks = [0_u32, 2, 1, 0];
+        let grid = andlock::grid::build_grid_definition(&[2_i32], 0).map_err(anyhow::Error::msg)?;
         let progress =
             drive_dp::<_, u128>(&grid, &blocks, (2, 64), None, "64 B", None, &mut printer);
         assert!(!progress.overflow);
