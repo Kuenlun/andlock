@@ -40,7 +40,7 @@ test = false
 
 [lints.rust]
 warnings = "deny"
-unsafe_code = "deny"
+unsafe_code = "forbid"
 unexpected_cfgs = { level = "deny", check-cfg = ['cfg(coverage_nightly)'] }
 unsafe_op_in_unsafe_fn = "forbid"
 let_underscore_drop = "deny"
