@@ -2,14 +2,12 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
-//! Baseline benchmarks for [`count_patterns_dp`] across representative grids.
+#![expect(
+    unused_crate_dependencies,
+    reason = "Cargo supplies executable and integration-test dependencies that this counting benchmark does not use."
+)]
 
-// Cargo shares package dependencies across its library, binary and test targets.
-use {
-    anyhow as _, clap as _, clap_cargo as _, clap_complete as _, console as _, ctrlc as _,
-    indicatif as _, num_bigint as _, parse_size as _, portable_pty as _, serde as _,
-    serde_json as _, sysinfo as _, vt100 as _,
-};
+//! Baseline benchmarks for [`count_patterns_dp`] across representative grids.
 
 use std::hint::black_box;
 use std::ops::ControlFlow;

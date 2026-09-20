@@ -2,11 +2,15 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
-//! Count valid unlock patterns and render completed results and diagnostics.
+#![cfg_attr(
+    test,
+    expect(
+        unused_crate_dependencies,
+        reason = "Cargo supplies dev-dependencies used by integration tests and benchmarks, not this binary's unit tests."
+    )
+)]
 
-// Cargo shares package dependencies across its library, binary and test targets.
-#[cfg(test)]
-use {criterion as _, portable_pty as _, vt100 as _};
+//! Count valid unlock patterns and render completed results and diagnostics.
 
 use std::process::ExitCode;
 

@@ -2,16 +2,14 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    unused_crate_dependencies,
+    reason = "Cargo supplies dependencies used by other package targets, beyond those needed by this integration test."
+)]
+
 //! Interrupt a running count through a PTY and check its final rendered report.
 //! The terminal model must contain one table, a correct subtotal and a matching
 //! interruption footer after the live progress display is cleared.
-
-// Cargo shares package dependencies across its library, binary and test targets.
-use {
-    andlock as _, anyhow as _, clap as _, clap_cargo as _, clap_complete as _, console as _,
-    criterion as _, ctrlc as _, indicatif as _, num_bigint as _, parse_size as _,
-    portable_pty as _, serde as _, serde_json as _, sysinfo as _, vt100 as _,
-};
 
 #[cfg(unix)]
 mod unix {

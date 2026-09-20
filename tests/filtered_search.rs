@@ -2,6 +2,11 @@
 // andlock - Count Android-style unlock patterns on n-dimensional grids
 // Copyright (c) 2026 Juan Luis Leal Contreras (Kuenlun)
 
+#![expect(
+    unused_crate_dependencies,
+    reason = "Cargo supplies dependencies used by other package targets, beyond those needed by this integration test."
+)]
+
 //! Compare visit-filtered counts against exhaustive fixed-grid reference results.
 
 #![expect(
@@ -20,13 +25,6 @@
     clippy::panic,
     reason = "Subprocess and event fixtures fail immediately when the expected test protocol is violated."
 )]
-
-// Cargo shares package dependencies across its library, binary and test targets.
-use {
-    anyhow as _, clap as _, clap_cargo as _, clap_complete as _, console as _, criterion as _,
-    ctrlc as _, indicatif as _, parse_size as _, portable_pty as _, serde as _, serde_json as _,
-    sysinfo as _, vt100 as _,
-};
 
 use std::ops::ControlFlow;
 
